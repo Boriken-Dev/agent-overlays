@@ -1,0 +1,84 @@
+name = "Boriken Dev agent overlays"
+description = "Overlays that give a coding agent working rules, workflows and tools: engineering process, language conventions, release, sync and recovery."
+homepage = "https://github.com/Boriken-Dev/agent-overlays"
+about = "Eight overlays in the Agent Overlay Specification format, each a folder under overlays/. Install one with dotagents or from a Store that reads catalogs; nothing here runs until you install and allow it."
+
+[overlays.engineering]
+source = "overlays/engineering"
+description = "Always-on discipline for an agent that works in your repositories: commit shape, release-tag consent, benchmark evidence and token discipline. Adds the plan, execute, review and parallel-work workflows, language-neutral repository templates, and the commands plans, leak-check, eol, summarize-run and compare-bench."
+
+[overlays.engineering.about]
+summary = "Process rules, plan and review workflows, and repository templates for agent-run engineering."
+icon = "overlays/engineering/icon.png"
+homepage = "https://github.com/Boriken-Dev/agent-overlays/tree/main/overlays/engineering"
+tags = ["workflow", "process"]
+
+[overlays.net]
+source = "overlays/net"
+description = "Puts a curl launcher on the agent's path (the real curl with the agent proxy added, else a curl-compatible command over the Python standard library), a certifi shim that reads the operating system's trust store, and an HTTP client with proxy, cookie-jar and hook support. Every setting is read with an AGENTS_ prefix."
+
+[overlays.net.about]
+summary = "A drop-in curl and an operating-system trust store for agents that must fetch URLs."
+icon = "overlays/net/icon.png"
+homepage = "https://github.com/Boriken-Dev/agent-overlays/tree/main/overlays/net"
+tags = ["network"]
+
+[overlays.node]
+source = "overlays/node"
+description = "Conventions for Node and JavaScript work, a package.json template and test, docs and release workflows. Builds on the engineering overlay."
+
+[overlays.node.about]
+summary = "Node and JavaScript repository conventions, a package.json template and CI workflows."
+icon = "overlays/node/icon.png"
+homepage = "https://github.com/Boriken-Dev/agent-overlays/tree/main/overlays/node"
+tags = ["language", "javascript"]
+
+[overlays.private-sync]
+source = "overlays/private-sync"
+description = "One private git repository holds your per-user and per-project agent files: each project's agent directory is a worktree of its own branch, pulled when a session starts and pushed after each turn. Its hooks stay off until you allow them."
+
+[overlays.private-sync.about]
+summary = "Keep each project's agent working files in one private git repository, synced between machines."
+icon = "overlays/private-sync/icon.png"
+homepage = "https://github.com/Boriken-Dev/agent-overlays/tree/main/overlays/private-sync"
+tags = ["sync", "workflow"]
+
+[overlays.python]
+source = "overlays/python"
+description = "Conventions and library standards for Python work, a pyproject and mkdocs template, CI workflows, and the commands pyvenv and py, which make and run project virtual environments. Builds on the engineering overlay."
+
+[overlays.python.about]
+summary = "Python repository conventions, library standards, templates and project virtual environments."
+icon = "overlays/python/icon.png"
+homepage = "https://github.com/Boriken-Dev/agent-overlays/tree/main/overlays/python"
+tags = ["language", "python"]
+
+[overlays.recovery]
+source = "overlays/recovery"
+description = "A guide for an agent to rebuild a lost or damaged agent configuration directory from session transcripts and caches left on the machine."
+
+[overlays.recovery.about]
+summary = "Reconstruct a lost or corrupted agent configuration from transcripts and caches."
+icon = "overlays/recovery/icon.png"
+homepage = "https://github.com/Boriken-Dev/agent-overlays/tree/main/overlays/recovery"
+tags = ["recovery"]
+
+[overlays.release]
+source = "overlays/release"
+description = "A host-agnostic release helper: the agent emits the context for a commit plan, applies it one commit at a time, then tags and follows the CI run on GitHub (gh) or GitLab (gitlabq)."
+
+[overlays.release.about]
+summary = "Cut releases and watch their CI, on GitHub or GitLab, with a commit plan the agent applies."
+icon = "overlays/release/icon.png"
+homepage = "https://github.com/Boriken-Dev/agent-overlays/tree/main/overlays/release"
+tags = ["release", "workflow"]
+
+[overlays.rust]
+source = "overlays/rust"
+description = "Conventions for Rust work, standards for designing, naming and documenting crates (public API, errors, unsafe, features, FFI, plugins), a Cargo.toml template and CI workflows. Builds on the engineering overlay."
+
+[overlays.rust.about]
+summary = "Rust repository conventions, crate standards, a Cargo.toml template and CI workflows."
+icon = "overlays/rust/icon.png"
+homepage = "https://github.com/Boriken-Dev/agent-overlays/tree/main/overlays/rust"
+tags = ["language", "rust"]
