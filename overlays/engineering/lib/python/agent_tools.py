@@ -29,8 +29,8 @@ LOCAL_ENV = "AGENT_TOOLS_LOCAL"
 
 # A schema value is a type, a tuple of types, a list holding the schema of its elements
 # (a table, or a type), or a dict (a table). `Any` accepts anything.
-_STEP = {"name": str, "run": (str, list), "when": [str], "env": {"*": str}, "slot": bool}
-_WSL_STEP = {"name": str, "run": (str, list), "env": {"*": str}}
+_STEP = {"name": str, "run": (str, list), "when": [str], "env": {"*": str}, "slot": bool, "cwd": str}
+_WSL_STEP = {"name": str, "run": (str, list), "env": {"*": str}, "cwd": str}
 _RULE = {"path": str, "how": str, "run": (str, list)}
 
 PROJECT_SCHEMA: dict[str, Any] = {
