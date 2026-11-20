@@ -4,6 +4,26 @@ Base standard: applies to every crate. Index: [README.md](../README.md).
 What crosses a C boundary is in [FFI.md](../specialized/FFI.md); the traps
 behind these rules are in `../../kb/RUST.md`.
 
+## When it is used
+
+- **`unsafe` is allowed, not banned; it is used only when proved
+  necessary.** A crate never gives up a capability, a guarantee or a
+  measured performance win only to stay free of `unsafe`. (**house**)
+- **Proved necessary means one of:** no safe API in `std` or a maintained
+  crate does the job (a system call or flag with no safe wrapper, such as
+  a process-death signal or creating a process suspended), or a measured
+  performance need that safe code cannot meet. A performance case is
+  measured as the performance rules require (CI, before and after, with a
+  control), not argued.
+- **First look for a maintained crate that already wraps it safely** and
+  use that instead; write the `unsafe` only when none fits or the one that
+  does costs more than the few lines it would save.
+- **The reason is recorded with the code**: the entry in the test's list of
+  allowed files says what needed it and what was ruled out, so a reviewer
+  can tell when the reason no longer holds.
+- **A limitation documented only because the fix needs `unsafe` is a
+  defect**, not a design limit: fix it under these rules.
+
 ## Where it may appear
 
 - **`#![forbid(unsafe_code)]` at every crate root** that needs none, and at

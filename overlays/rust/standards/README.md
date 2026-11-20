@@ -69,8 +69,10 @@ not a precedent to copy.
   settings; no `_with`/`_without` function families.
 - No safe function can reach undefined behaviour for any input; a type whose
   fields carry a safety invariant keeps them private.
-- `#![forbid(unsafe_code)]` everywhere `unsafe` is not needed, and a test
-  names every file allowed to hold it.
+- `unsafe` is used only when proved necessary (no safe API does it, or a
+  measured performance need), never avoided at the cost of a capability;
+  `#![forbid(unsafe_code)]` everywhere it is not needed, and a test names
+  every file allowed to hold it and why.
 - Public error and growing enums are `#[non_exhaustive]`; errors implement
   `std::error::Error` and never quote input.
 - A library keeps no process-global state, installs no logger, and neither

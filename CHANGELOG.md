@@ -15,3 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - An `[about]` table in each overlay's `overlay.cfg` (summary, icon, homepage, repository, license, tags) and an `icon.png`
   drawn by `tools/make_icons.py`. Nothing in them changes what an overlay does.
 - `tools/validate.py` and the manual `Validate` workflow.
+
+### Changed
+
+- rust: `unsafe` is allowed when proved necessary (no safe API does it, or a measured performance need), with the reason kept in
+  the list of allowed files; a limitation kept only to avoid `unsafe` is a defect.
