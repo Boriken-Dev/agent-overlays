@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import collections
 import fnmatch
+import gzip
 import hashlib
 import io
 import json
@@ -3180,6 +3181,316 @@ def add_sdk(sub: argparse._SubParsersAction) -> None:
 
 
 SECTIONS.append(add_sdk)
+
+# --- release: binaries, a universal macOS binary, container images -----------------------------------------------------
+
+SCHEMA["release"] = Key(
+    "table",
+    None,
+    "Release builds: one binary archive per target, a universal macOS binary, container images.",
+    {
+        "name": Key("str", "", "The name archives are made under; empty: the repository directory's."),
+        "version_from": Key("str", "Cargo.toml", "The manifest whose [workspace.package] or [package] version names the release."),
+        "toolchain": Key("str", "", "A rustup toolchain (for example 1.99.1) that cargo runs under; empty: the one on PATH."),
+        "dist": Key("str", "dist", "Where archives and SHA256SUMS are written, relative to the repository."),
+        "packages": Key(
+            "tables",
+            None,
+            "What is built for each target.",
+            {
+                "package": Key("str", REQUIRED, "The cargo package."),
+                "bin": Key("str", "", "The binary it builds; empty: the package's name."),
+                "features": Key("strs", [], "Cargo features to enable."),
+            },
+        ),
+        "target": Key(
+            "tables",
+            None,
+            "A target, and the runner that builds it natively.",
+            {
+                "triple": Key("str", REQUIRED, "The Rust target triple."),
+                "runner": Key("str", REQUIRED, "The CI runner label that builds it."),
+                "rustflags": Key("strs", [], "Words of RUSTFLAGS (for example -C target-feature=+crt-static)."),
+                "env": Key("map", {}, "Environment variables of the build; {triple} and {triple_} (hyphens as underscores) are replaced in names and values."),
+                "archive": Key("str", "tar.gz", "`tar.gz` or `zip`."),
+            },
+        ),
+        "universal": Key(
+            "table",
+            None,
+            "A macOS binary for two architectures, joined with lipo.",
+            {"macos": Key("strs", [], "The two Apple triples, both built on one runner.")},
+        ),
+        "image": Key(
+            "table",
+            None,
+            "A container image, built natively on each architecture's runner.",
+            {
+                "file": Key("str", "", "The Containerfile, relative to the repository; empty: no image."),
+                "context": Key("str", ".", "The build context, relative to the repository."),
+                "name": Key("str", "", "The image name; empty: the release name."),
+                "tool": Key("str", "", "`podman` or `docker`; empty: podman when found, else docker."),
+                "archs": Key("map", {}, "The architectures (amd64, arm64) and the runner that builds each."),
+            },
+        ),
+    },
+)
+
+
+def release_name(ctx: Ctx) -> str:
+    return ctx.cfg.release.name or ctx.root.name
+
+
+def release_version(ctx: Ctx) -> str:
+    """The release version: `[workspace.package] version`, else `[package] version`, of `version_from`."""
+    path = ctx.root / ctx.cfg.release.version_from
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise Problem(f"{ctx.cfg.release.version_from}: {error}") from error
+    version = data.get("workspace", {}).get("package", {}).get("version") or data.get("package", {}).get("version")
+    if not isinstance(version, str):
+        raise Problem(f"{ctx.cfg.release.version_from} has no [workspace.package] or [package] version")
+    return version
+
+
+def target_of(ctx: Ctx, triple: str) -> Table:
+    for target in ctx.cfg.release.target:
+        if target.triple == triple:
+            return target
+    raise Problem(f"[[release.target]] has no {triple}; the targets are {', '.join(t.triple for t in ctx.cfg.release.target) or 'none'}")
+
+
+def archive_name(ctx: Ctx, label: str, kind: str) -> str:
+    if kind not in ("tar.gz", "zip"):
+        raise Problem(f"archive {kind!r} is not tar.gz or zip")
+    return f"{release_name(ctx)}-{release_version(ctx)}-{label}.{kind}"
+
+
+def release_matrix(ctx: Ctx, args: argparse.Namespace) -> int:
+    """The JSON a workflow's `fromJSON` reads: the runners come from the configuration alone."""
+    cfg = ctx.cfg.release
+    universal = [t for t in cfg.target if t.triple in cfg.universal.macos]
+    plan = {
+        "binaries": {"include": [{"target": t.triple, "runner": t.runner, "archive": t.archive} for t in cfg.target]},
+        "universal": {"include": [{"name": "universal-apple-darwin", "runner": universal[0].runner, "targets": " ".join(cfg.universal.macos)}] if len(cfg.universal.macos) == 2 and universal else []},
+        "images": {"include": [{"arch": arch, "runner": runner} for arch, runner in sorted(cfg.image.archs.items())] if cfg.image.file else []},
+    }
+    if len(cfg.universal.macos) not in (0, 2):
+        raise Problem("[release.universal] macos names two triples, or none")
+    for triple in cfg.universal.macos:
+        target_of(ctx, triple)
+    print(json.dumps(plan[args.section] if args.section else plan, indent=None if args.section else 2))
+    return 0
+
+
+def exe_suffix(triple: str) -> str:
+    return ".exe" if "windows" in triple else ""
+
+
+def update_sums(dist: Path, name: str, data: bytes) -> None:
+    """Records an artifact in dist/SHA256SUMS (`HASH  NAME`, sorted), replacing an earlier line for it."""
+    sums = dist / "SHA256SUMS"
+    rows: dict[str, str] = {}
+    if sums.is_file():
+        for line in sums.read_text(encoding="utf-8").splitlines():
+            digest, _, file = line.partition("  ")
+            if digest and file:
+                rows[file] = digest
+    rows[name] = sha256(data)
+    sums.write_bytes("".join(f"{rows[n]}  {n}\n" for n in sorted(rows)).encode("utf-8"))
+
+
+def pack(dist: Path, name: str, folder: str, files: dict[str, Path], kind: str, executables: tuple[str, ...] = ()) -> Path:
+    """An archive holding `folder/FILE` for each file, with no timestamps, owners or host paths, so
+    the same inputs give the same bytes. The names in `executables` get the executable bit."""
+    dist.mkdir(parents=True, exist_ok=True)
+    out = dist / name
+    if kind == "zip":
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+            for arc, path in sorted(files.items()):
+                info = zipfile.ZipInfo(f"{folder}/{arc}", date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = (0o755 if arc in executables else 0o644) << 16
+                zf.writestr(info, path.read_bytes())
+    else:
+        with open(out, "wb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as zipped:
+            with tarfile.open(fileobj=zipped, mode="w", format=tarfile.PAX_FORMAT) as tar:
+                for arc, path in sorted(files.items()):
+                    info = tarfile.TarInfo(f"{folder}/{arc}")
+                    data = path.read_bytes()
+                    info.size, info.mtime, info.mode = len(data), 0, 0o755 if arc in executables else 0o644
+                    info.uid = info.gid = 0
+                    info.uname = info.gname = ""
+                    tar.addfile(info, io.BytesIO(data))
+    return out
+
+
+def extras(ctx: Ctx) -> dict[str, Path]:
+    """The licence and readme files at the repository root, which ship beside the binaries."""
+    return {p.name: p for p in sorted(ctx.root.iterdir()) if p.is_file() and re.match(r"^(LICENSE|LICENCE|COPYING|README)", p.name, re.IGNORECASE)}
+
+
+def cargo_command(ctx: Ctx, config: Path | None, *args: str) -> list[str]:
+    cfg = ctx.cfg.release
+    return ["cargo", *([f"+{cfg.toolchain}"] if cfg.toolchain else []), *(["--config", str(config)] if config else []), *args]
+
+
+def release_build(ctx: Ctx, args: argparse.Namespace) -> int:
+    cfg = ctx.cfg.release
+    target = target_of(ctx, args.target)
+    if not cfg.packages:
+        raise Problem("[[release.packages]] lists nothing to build")
+    name = archive_name(ctx, target.triple, target.archive)
+    config = None
+    env = dict(os.environ)
+    if args.offline:
+        lock_path = args.cargo_lock.resolve() if args.cargo_lock else ctx.root / ctx.cfg.deps.cargo_lock
+        info = use_crates(ctx, find_deps(ctx, args.deps), read_lock(lock_path), lock_path, args.out)
+        config = Path(info["config"])
+        env["CARGO_NET_OFFLINE"] = "true"
+    fill = lambda text: text.replace("{triple_}", target.triple.replace("-", "_")).replace("{triple}", target.triple)  # noqa: E731
+    env.update({fill(k): fill(v) for k, v in target.env.items()})
+    if target.rustflags:
+        env["RUSTFLAGS"] = " ".join(target.rustflags)
+    built: dict[str, Path] = {}
+    for package in cfg.packages:
+        command = cargo_command(ctx, config, "build", "--release", "--locked", "--target", target.triple, "-p", package.package)
+        if package.bin:
+            command += ["--bin", package.bin]
+        if package.features:
+            command += ["--features", ",".join(package.features)]
+        run_tool(command, env, ctx.root)
+        binary = (package.bin or package.package) + exe_suffix(target.triple)
+        path = ctx.root / "target" / target.triple / "release" / binary
+        if not path.is_file():
+            raise Problem(f"cargo built no {path}")
+        built[binary] = path
+    folder = name.removesuffix("." + target.archive)
+    dist = ctx.root / cfg.dist
+    out = pack(dist, name, folder, {**extras(ctx), **built}, target.archive, tuple(built))
+    update_sums(dist, name, out.read_bytes())
+    print(f"built {out.relative_to(ctx.root).as_posix()}")
+    return 0
+
+
+def release_universal(ctx: Ctx, args: argparse.Namespace) -> int:
+    """One macOS binary for both Apple architectures (lipo), packed as `universal-apple-darwin`."""
+    cfg = ctx.cfg.release
+    triples = cfg.universal.macos
+    if len(triples) != 2:
+        raise Problem("[release.universal] macos must name two triples")
+    dist = ctx.root / cfg.dist
+    name = archive_name(ctx, "universal-apple-darwin", "tar.gz")
+    folder = name.removesuffix(".tar.gz")
+    scratch = Path(tempfile.mkdtemp(prefix="build-universal-"))
+    try:
+        joined: dict[str, Path] = {}
+        for package in cfg.packages:
+            binary = package.bin or package.package
+            parts = [ctx.root / "target" / t / "release" / binary for t in triples]
+            for part in parts:
+                if not part.is_file():
+                    raise Problem(f"{part} is missing; build {part.parent.parent.name} first")
+            out = scratch / binary
+            run_tool(["lipo", "-create", "-output", str(out), *map(str, parts)])
+            code, text = capture_tool(["lipo", "-info", str(out)])
+            if code != 0 or "x86_64" not in text or "arm64" not in text:
+                raise Problem(f"lipo -info of {binary} does not list both architectures: {text.strip()}")
+            joined[binary] = out
+        out = pack(dist, name, folder, {**extras(ctx), **joined}, "tar.gz", tuple(joined))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    update_sums(dist, name, out.read_bytes())
+    print(f"built {out.relative_to(ctx.root).as_posix()}")
+    return 0
+
+
+def release_image(ctx: Ctx, args: argparse.Namespace) -> int:
+    cfg = ctx.cfg.release
+    image = cfg.image
+    if not image.file:
+        raise Problem("[release.image] file is not set")
+    if args.arch not in image.archs:
+        raise Problem(f"[release.image] archs has no {args.arch}; it has {', '.join(sorted(image.archs)) or 'none'}")
+    tool = image.tool or next((t for t in ("podman", "docker") if shutil.which(t)), "")
+    if tool not in ("podman", "docker"):
+        raise Problem("neither podman nor docker is installed")
+    tag = f"{image.name or release_name(ctx)}:{release_version(ctx)}-{args.arch}"
+    run_tool([tool, "build", "--platform", f"linux/{args.arch}", "-f", str(ctx.root / image.file), "-t", tag, str(ctx.root / image.context)])
+    dist = ctx.root / cfg.dist
+    dist.mkdir(parents=True, exist_ok=True)
+    out = dist / f"{release_name(ctx)}-{release_version(ctx)}-image-{args.arch}.tar"
+    # podman writes an OCI archive; docker has no such format and writes its own.
+    run_tool([tool, "save", *(["--format", "oci-archive"] if tool == "podman" else []), "-o", str(out), tag])
+    update_sums(dist, out.name, out.read_bytes())
+    print(f"built {out.relative_to(ctx.root).as_posix()}")
+    return 0
+
+
+def release_verify(ctx: Ctx, args: argparse.Namespace) -> int:
+    """Each Linux binary in the archives is statically linked (`file` says so)."""
+    cfg = ctx.cfg.release
+    targets = [t for t in cfg.target if "linux" in t.triple and (not args.target or t.triple == args.target)]
+    if args.target:
+        target_of(ctx, args.target)
+    if not targets:
+        print("no Linux target to verify")
+        return 0
+    if not shutil.which("file"):
+        raise Problem("the `file` command is not installed")
+    dist = ctx.root / cfg.dist
+    found = []
+    for target in targets:
+        archive = dist / archive_name(ctx, target.triple, target.archive)
+        if not archive.is_file():
+            found.append(f"{archive.relative_to(ctx.root).as_posix()}: missing; build {target.triple} first")
+            continue
+        scratch = Path(tempfile.mkdtemp(prefix="build-verify-"))
+        try:
+            if target.archive == "zip":
+                with zipfile.ZipFile(archive) as zf:
+                    safe_unzip(zf, scratch, 1)
+            else:
+                with tarfile.open(archive, "r:gz") as tar:
+                    safe_extract(tar, scratch, strip=1)
+            for package in cfg.packages:
+                binary = scratch / (package.bin or package.package)
+                code, text = capture_tool(["file", "--brief", str(binary)])
+                if code != 0 or not re.search(r"statically linked|static-pie linked", text):
+                    found.append(f"{target.triple}: {binary.name} is not statically linked: {text.strip() or 'file failed'}")
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+    if found:
+        raise Problem("\n".join(found))
+    print(f"ok: {len(targets)} Linux target(s) statically linked")
+    return 0
+
+
+def add_release(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser("release", help="release binaries, a universal macOS binary and container images")
+    commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
+    matrix = commands.add_parser("matrix", help="print the JSON a workflow's fromJSON reads: targets, runners, images")
+    matrix.add_argument("--section", choices=("binaries", "universal", "images"), help="print only this section, on one line")
+    matrix.set_defaults(run=release_matrix)
+    build_ = commands.add_parser("build", help="cargo build --release --locked one target, pack it, and add it to SHA256SUMS")
+    build_.add_argument("--target", required=True, metavar="TRIPLE", help="a [[release.target]] triple")
+    build_.add_argument("--offline", action="store_true", help="build from the deps branch (`deps use`): no network")
+    build_.add_argument("--deps", type=Path, metavar="DIR", help="the deps checkout for --offline (default: `deps path`)")
+    build_.add_argument("--cargo-lock", type=Path, metavar="FILE", help="read this Cargo.lock for --offline")
+    build_.add_argument("--out", type=Path, metavar="DIR", help="where --offline writes the cargo home")
+    build_.set_defaults(run=release_build)
+    universal = commands.add_parser("universal", help="join the two built Apple targets with lipo and pack the result")
+    universal.set_defaults(run=release_universal)
+    image = commands.add_parser("image", help="build the container image for one architecture and save it as an OCI archive")
+    image.add_argument("--arch", required=True, metavar="ARCH", help="amd64 or arm64: a key of [release.image] archs")
+    image.set_defaults(run=release_image)
+    verify = commands.add_parser("verify", help="check that each Linux binary in dist/ is statically linked")
+    verify.add_argument("--target", metavar="TRIPLE", help="only this target")
+    verify.set_defaults(run=release_verify)
+
+
+SECTIONS.append(add_release)
 
 # @@END-OF-SECTIONS@@
 

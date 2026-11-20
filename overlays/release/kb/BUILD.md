@@ -96,3 +96,21 @@ version column is the group that needs it), and no version floats (`latest`, `st
   `env.sh`/`env.ps1` written (`[sdk.env]` and `[sdk] path` add variables and directories). Every download is verified against
   the lock before it is used. `--check` installs nothing and exits 1 when something is missing; `system` rows are only checked,
   and `--print-system` prints `[sdk.system] print` for the platform.
+
+## Release builds (`release`)
+
+`[release]` names the packages and targets; the next repository adds targets without code.
+
+- `release matrix [--section binaries|universal|images]` prints the JSON a workflow's `fromJSON` reads: one source of truth for
+  the runners (`[[release.target]] triple, runner`) and for the image architectures (`[release.image] archs`).
+- `release build --target TRIPLE [--offline]` runs `cargo build --release --locked --target TRIPLE -p PACKAGE` for each
+  `[[release.packages]]` entry (`--bin` and `--features` from it), with the target's `rustflags` and `env` (`{triple}` and
+  `{triple_}` are replaced), packs `dist/NAME-VERSION-TRIPLE.tar.gz` (or `.zip`) with the binaries and the licence and readme
+  files, and adds it to `dist/SHA256SUMS`. Archives carry no timestamps or owners, so the same inputs give the same bytes.
+  `--offline` builds from the deps branch (`cargo --config` the cargo home `deps use` writes, `CARGO_NET_OFFLINE`).
+- `release universal` joins the two built `[release.universal] macos` targets with `lipo` and checks `lipo -info` lists both.
+- `release image --arch ARCH` runs `podman build` (or `docker`) on the native runner and saves an OCI archive
+  (`podman save --format oci-archive`) as `dist/NAME-VERSION-image-ARCH.tar`. Nothing is pushed to a registry.
+- `release verify` checks with `file` that each Linux binary in `dist/` is statically linked.
+
+A workflow runs `release matrix`, builds each target on its runner, and uploads `dist/`.

@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - release: `build.py sdk check` (lint an SDK lock, cover the deps pin, compare `[[sdk.agree]]` facts, `--online` publisher
   hashes) and `build.py sdk install` (rustup, toolchains, archives, git items, virtual environments, `env.sh` and `env.ps1`,
   every download verified; `--check` and `--print-system`).
+- release: `build.py release` (`matrix`, `build --target [--offline]`, `universal`, `image --arch`, `verify`): per-target
+  binary archives with `SHA256SUMS`, a universal macOS binary, OCI image archives, and a static-link check, all from
+  `[release]` in `tools/build.cfg`.
 - A `Test` workflow running the release overlay's tests on Linux, Windows and macOS at Python 3.11 and 3.14.
 
 ### Changed
