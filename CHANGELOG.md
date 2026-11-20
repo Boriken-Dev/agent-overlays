@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   drawn by `tools/make_icons.py`. Nothing in them changes what an overlay does.
 - `tools/validate.py` and the manual `Validate` workflow.
 
+- release: `repo/tools/build.py`, a standard-library build tool a repository copies into its `tools/` and configures with
+  `tools/build.cfg`; `self check` and `self update` keep the copy equal to the overlay's, and `help config` prints every
+  configuration key with its default. `kb/BUILD.md` says how to adopt and update it.
+- A `Test` workflow running the release overlay's tests on Linux, Windows and macOS at Python 3.11 and 3.14.
+
 ### Changed
 
 - rust: `unsafe` is allowed when proved necessary (no safe API does it, or a measured performance need), with the reason kept in

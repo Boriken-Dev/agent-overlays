@@ -65,7 +65,7 @@ tags = ["recovery"]
 
 [overlays.release]
 source = "overlays/release"
-description = "A host-agnostic release helper: the agent emits the context for a commit plan, applies it one commit at a time, then tags and follows the CI run on GitHub (gh) or GitLab (gitlabq)."
+description = "A host-agnostic release helper: the agent emits the context for a commit plan, applies it one commit at a time, then tags and follows the CI run on GitHub (gh) or GitLab (gitlabq). Also the shared repository tools a repo copies into tools/: build.py (deps branch, scans, SDK lock, offline and release builds), public_api.py and apk.py."
 
 [overlays.release.about]
 summary = "Cut releases and watch their CI, on GitHub or GitLab, with a commit plan the agent applies."
