@@ -4,6 +4,7 @@ plugin junctions and the pinned Flutter checkout."""
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -454,7 +455,7 @@ def plugins(build, tmp_path, monkeypatch):
     one.mkdir(parents=True)
     two.mkdir(parents=True)
     listing = {"plugins": {"windows": [
-        {"name": "one", "path": str(one) + "\\\\"},
+        {"name": "one", "path": str(one) + os.sep * 2},
         {"name": "two", "path": str(two)},
         {"name": "gone", "path": str(tmp_path / "plugins" / "gone")},
     ]}}
