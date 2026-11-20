@@ -1016,3 +1016,16 @@ def test_scan_takes_one_mode_at_a_time(build, tmp_path):
     with pytest.raises(SystemExit) as stop:
         build.main(["--root", str(root), "scan", "HEAD", "--all-refs"])
     assert stop.value.code == 2
+
+
+def test_refresh_without_a_pin_says_current_when_nothing_changed(build, registry, tmp_path, capsys):
+    root, _, fetched = registry
+    ctx_for(build, root)
+    commit_all(root)
+    build.main(["--root", str(root), "deps", "init"])
+    capsys.readouterr()
+    assert build.main(["--root", str(root), "deps", "refresh"]) == 0
+    assert "pinned deps" in capsys.readouterr().out
+    assert build.main(["--root", str(root), "deps", "refresh"]) == 0
+    assert "current: deps " in capsys.readouterr().out
+    assert len(fetched) == 1

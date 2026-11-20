@@ -1673,6 +1673,11 @@ def deps_refresh(ctx: Ctx, args: argparse.Namespace) -> int:
             print(f"current: deps {pinned} covers {lock_path.name}")
             return 0
     pin = run_git("rev-parse", "HEAD", cwd=deps)
+    if not pin_lock and not committed:
+        found, _ = ref_problems(ctx, lock, pin) if has_commit(ctx.root, pin) else ([f"deps {pin} is not in this repository"], [])
+        if not found:
+            print(f"current: deps {pin} covers {lock_path.name}")
+            return 0
     repinned = []
     for rule in cfg.repin:
         path = deps / rule.file
