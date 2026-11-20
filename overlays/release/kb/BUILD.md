@@ -114,3 +114,18 @@ version column is the group that needs it), and no version floats (`latest`, `st
 - `release verify` checks with `file` that each Linux binary in `dist/` is statically linked.
 
 A workflow runs `release matrix`, builds each target on its runner, and uploads `dist/`.
+
+## `public_api.py` and `apk.py`
+
+Both read their own table of `tools/build.cfg`, carry the same three header lines as `build.py`, and are kept equal to the
+overlay's by `self check` once they are in `[tools] files`. An unknown key in their table is refused with its path.
+
+- `public_api.py check|update` replaces a script that runs `cargo +TOOLCHAIN public-api` and compares its output with
+  checked-in snapshots. `[public_api]`: `packages`; `toolchain`, or `sdk = "api rust"` to take it from the SDK lock; `layout =
+  "dir"` (`PATH/PACKAGE.txt` for each package, default `tools/public-api`) or `"file"` (one `tools/public-api.txt`);
+  `args`; `cargo`. `check` also names a snapshot no listed package owns.
+- `apk.py check APK...` inspects a built Android APK, the artifact that ships rather than its inputs. `[apk]`: `forbid`
+  (patterns no entry may match, each with a `control_base64` sample the pattern must match: a check whose planted control is
+  not found exits 2 instead of passing, and a hit is reported by its place, never its text), `allow_flag` (a flag that
+  reports hits without failing, for a build made on purpose), `permissions` (`want`, `unwanted`, read from the binary
+  manifest), `abis` (exactly these), `libs` (carried by every shipped ABI), `max_entry_bytes`.

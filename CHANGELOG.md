@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - release: `build.py release` (`matrix`, `build --target [--offline]`, `universal`, `image --arch`, `verify`): per-target
   binary archives with `SHA256SUMS`, a universal macOS binary, OCI image archives, and a static-link check, all from
   `[release]` in `tools/build.cfg`.
+- release: `repo/tools/public_api.py` (check or update public API snapshots, one file or one per package) and
+  `repo/tools/apk.py` (forbidden strings with a planted control, permissions, ABIs, required libraries of a built APK),
+  configured by `[public_api]` and `[apk]` in `tools/build.cfg`.
 - A `Test` workflow running the release overlay's tests on Linux, Windows and macOS at Python 3.11 and 3.14.
 
 ### Changed

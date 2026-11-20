@@ -3492,6 +3492,50 @@ def add_release(sub: argparse._SubParsersAction) -> None:
 
 SECTIONS.append(add_release)
 
+# --- the other copied tools: public_api.py and apk.py read their own tables of this file ---------------------------
+
+SCHEMA["public_api"] = Key(
+    "table",
+    None,
+    "public_api.py: Rust public API snapshots.",
+    {
+        "packages": Key("strs", [], "The packages to snapshot."),
+        "toolchain": Key("str", "", "A rustup toolchain, passed as `cargo +TOOLCHAIN`; empty adds none."),
+        "sdk": Key("str", "", "`GROUP NAME`: the toolchain version is that row of the SDK lock; not with toolchain."),
+        "layout": Key("str", "dir", "`dir`: PATH/PACKAGE.txt for each package; `file`: one file at PATH."),
+        "path": Key("str", "", "The snapshot directory or file; empty: tools/public-api, or tools/public-api.txt for `file`."),
+        "args": Key("strs", ["--all-features", "-sss", "--color", "never"], "Arguments of `cargo public-api` after the package."),
+        "cargo": Key("str", "cargo", "The cargo executable."),
+    },
+)
+SCHEMA["apk"] = Key(
+    "table",
+    None,
+    "apk.py: checks of a built Android APK.",
+    {
+        "forbid": Key(
+            "tables",
+            None,
+            "A pattern no entry of the APK may match; a hit is reported by its place, never by its text.",
+            {
+                "string": Key("str", REQUIRED, "A regular expression over the bytes of each entry."),
+                "control_base64": Key("str", "", "Base64 of a sample the pattern must match: the check refuses to run when it does not (a check that cannot fail proves nothing)."),
+                "name": Key("str", "", "A label for reports; empty: the index."),
+            },
+        ),
+        "max_entry_bytes": Key("int", 268435456, "Entries larger than this are not scanned, and are listed."),
+        "allow_flag": Key("str", "", "A command-line flag that reports forbidden hits without failing, for a build made on purpose (for example --allow-sideload-key)."),
+        "permissions": Key(
+            "table",
+            None,
+            "Permissions in the built manifest.",
+            {"want": Key("strs", [], "Names that must be declared."), "unwanted": Key("strs", [], "Names that must not be.")},
+        ),
+        "abis": Key("strs", [], "The native ABIs the APK must ship, exactly; empty: not checked."),
+        "libs": Key("strs", [], "Libraries every shipped ABI must carry."),
+    },
+)
+
 # @@END-OF-SECTIONS@@
 
 
