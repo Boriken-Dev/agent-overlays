@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -45,10 +46,14 @@ def build():
 
 
 @pytest.fixture(autouse=True)
-def lf_text_files(monkeypatch):
-    """Text a test writes is LF on every platform, as the tools read and write it."""
+def isolated_files(monkeypatch, tmp_path):
+    """Text a test writes is LF on every platform, as the tools read and write it, and what a
+    tool puts in the system temporary directory goes to the test's own."""
 
     def write_text(self, data, encoding="utf-8", errors=None, newline=None):
         return self.write_bytes(data.encode(encoding or "utf-8"))
 
     monkeypatch.setattr(Path, "write_text", write_text)
+    scratch = tmp_path / "system-temp"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
