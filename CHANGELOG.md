@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - release: `repo/tools/build.py`, a standard-library build tool a repository copies into its `tools/` and configures with
   `tools/build.cfg`; `self check` and `self update` keep the copy equal to the overlay's, and `help config` prints every
   configuration key with its default. `kb/BUILD.md` says how to adopt and update it.
+- release: `build.py deps` (`sync`, `check [--quick] [--ref REF]`, `use`, `refresh`, `path`, `init`) keeps a `deps` branch of
+  vendored crates equal to `Cargo.lock`, and `build.py scan` refuses archives, executables, keys, wasm and opaque binaries in
+  a tree, a commit or all of history, with `[deps] allow` for the exceptions.
 - A `Test` workflow running the release overlay's tests on Linux, Windows and macOS at Python 3.11 and 3.14.
 
 ### Changed
