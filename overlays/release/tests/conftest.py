@@ -42,3 +42,13 @@ def init_repo(path: Path) -> Path:
 @pytest.fixture(scope="session")
 def build():
     return load_tool("build.py", "build_tool")
+
+
+@pytest.fixture(autouse=True)
+def lf_text_files(monkeypatch):
+    """Text a test writes is LF on every platform, as the tools read and write it."""
+
+    def write_text(self, data, encoding="utf-8", errors=None, newline=None):
+        return self.write_bytes(data.encode(encoding or "utf-8"))
+
+    monkeypatch.setattr(Path, "write_text", write_text)

@@ -29,6 +29,7 @@ import io
 import json
 import math
 import os
+import platform
 import posixpath
 import re
 import shutil
@@ -41,6 +42,7 @@ import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, Iterator, NamedTuple
@@ -824,31 +826,44 @@ def archive_files(data: bytes, prefix: str) -> dict[str, bytes]:
     return files
 
 
-def safe_extract(tar: tarfile.TarFile, dest: Path, links: str = "refuse") -> None:
+def unsafe_member(name: str) -> bool:
+    return name.startswith(("/", "\\")) or bool(re.match(r"^[A-Za-z]:", name)) or ".." in name.replace("\\", "/").split("/")
+
+
+def stripped(name: str, strip: int) -> list[str]:
+    return [p for p in posixpath.normpath(name).split("/") if p not in ("", ".")][strip:]
+
+
+def safe_extract(tar: tarfile.TarFile, dest: Path, links: str = "refuse", strip: int = 0) -> None:
     """Writes an archive member by member: regular files and directories, below `dest` only.
 
     A path that is absolute or climbs out with `..` is refused. A link is refused (`links =
-    "refuse"`), left out (`"skip"`), or made when it points inside `dest` (`"inside"`).
+    "refuse"`), left out (`"skip"`), or made when it points inside `dest` (`"inside"`, not on
+    Windows). `strip` drops that many leading path parts, as `tar --strip-components` does.
     """
     base = dest.resolve()
     for member in tar:
-        parts = posixpath.normpath(member.name).split("/") if member.name not in ("", ".") else []
-        if member.name.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", member.name) or ".." in member.name.replace("\\", "/").split("/"):
+        if unsafe_member(member.name):
             raise Problem(f"archive member {member.name} is outside the archive")
-        target = base.joinpath(*parts) if parts else base
+        parts = stripped(member.name, strip)
+        if not parts:
+            continue
+        target = base.joinpath(*parts)
         if member.isdir():
             target.mkdir(parents=True, exist_ok=True)
         elif member.isfile():
             target.parent.mkdir(parents=True, exist_ok=True)
-            source = tar.extractfile(member)
-            target.write_bytes(source.read())
+            target.write_bytes(tar.extractfile(member).read())
             if member.mode & 0o111 and os.name != "nt":
                 target.chmod(target.stat().st_mode | 0o111)
         elif member.issym() or member.islnk():
             if links == "refuse":
                 raise Problem(f"archive member {member.name} is a link; links are refused")
             if links == "inside" and os.name != "nt":
-                resolved = (target.parent / member.linkname).resolve() if member.issym() else base / member.linkname
+                if member.issym():
+                    resolved = (target.parent / member.linkname).resolve()
+                else:
+                    resolved = base.joinpath(*stripped(member.linkname, strip))
                 if base not in resolved.parents and resolved != base:
                     raise Problem(f"archive link {member.name} points outside the archive")
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -856,9 +871,28 @@ def safe_extract(tar: tarfile.TarFile, dest: Path, links: str = "refuse") -> Non
                     if member.issym():
                         os.symlink(member.linkname, target)
                     else:
-                        shutil.copyfile(base / member.linkname, target)
+                        shutil.copyfile(resolved, target)
         else:
             raise Problem(f"archive member {member.name} is not a regular file or directory")
+
+
+def safe_unzip(archive: zipfile.ZipFile, dest: Path, strip: int = 0) -> None:
+    """The same rules for a zip: no absolute or `..` path, no symbolic link."""
+    base = dest.resolve()
+    for info in archive.infolist():
+        if unsafe_member(info.filename):
+            raise Problem(f"archive member {info.filename} is outside the archive")
+        if (info.external_attr >> 16) & 0o170000 == 0o120000:
+            raise Problem(f"archive member {info.filename} is a link; links are refused")
+        parts = stripped(info.filename, strip)
+        if not parts:
+            continue
+        target = base.joinpath(*parts)
+        if info.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(archive.read(info))
 
 
 def keeps(path: str) -> bool:
@@ -1833,7 +1867,6 @@ SECTIONS.extend([add_deps, add_scan])
 
 # --- the SDK lock's rows (read here; `sdk` lints and installs them) -------------------------------------
 
-SCHEMA["sdk"] = Key("table", None, "The SDK lock.", {"lock": Key("str", "tools/sdk.lock", "The lock file, relative to the repository.")})
 
 
 class Item(NamedTuple):
@@ -2419,6 +2452,734 @@ def add_flutter(sub: argparse._SubParsersAction) -> None:
 
 
 SECTIONS.extend([add_offline, add_flutter])
+
+# --- sdk: the lock, its agreement with the repository, and installing it ------------------------------------------
+
+SDK_GROUPS = ["core", "app", "api", "docs", "test"]
+SDK_PLATFORMS = ["windows-x64", "windows-arm64", "linux-x64", "linux-arm64", "macos-arm64", "macos-x64"]
+TRIPLES = {
+    "windows-x64": "x86_64-pc-windows-msvc", "windows-arm64": "aarch64-pc-windows-msvc",
+    "linux-x64": "x86_64-unknown-linux-gnu", "linux-arm64": "aarch64-unknown-linux-gnu",
+    "macos-arm64": "aarch64-apple-darwin", "macos-x64": "x86_64-apple-darwin",
+}  # fmt: skip
+# A name that means "whatever is newest" is not a pin.
+FLOATING = re.compile(r"^(stable|beta|nightly|latest|lts|main|master|head|dev)$", re.IGNORECASE)
+
+SCHEMA["sdk"] = Key(
+    "table",
+    None,
+    "The SDK lock: every tool a build needs at an exact version, one row `GROUP NAME VERSION OS-ARCH|any SHA256|- URL|-` per line.",
+    {
+        "lock": Key("str", "tools/sdk.lock", "The lock file, relative to the repository."),
+        "groups": Key("strs", SDK_GROUPS, "The groups a row may name besides `system`."),
+        "platforms": Key("strs", SDK_PLATFORMS, "The platforms a row may name besides `any`."),
+        "all_platforms": Key("strs", ["core rustup-init"], "Rows (`GROUP NAME`) that must have a line for every platform."),
+        "max_bytes": Key("int", 20480, "The lock's size above which it is refused as not a text lock."),
+        "install": Key("strs", ["core"], "The groups `sdk install` installs when --groups is not given."),
+        "git_urls": Key("map", {}, "Item name to the URL it is cloned from, replacing the lock's (a mirror); $BUILD_SDK_GIT_URL_NAME wins."),
+        "env": Key("map", {}, "Variables env.sh and env.ps1 set; a value may use {prefix} and {dir:GROUP NAME}."),
+        "path": Key("strs", [], "Directories env.sh and env.ps1 put on PATH; the same templates."),
+        "agree": Key(
+            "tables",
+            None,
+            "A fact in the repository that must equal a row of the lock.",
+            {
+                "item": Key("str", REQUIRED, "The row, `GROUP NAME`."),
+                "file": Key("str", REQUIRED, "The file that states the fact, relative to the repository."),
+                "pattern": Key("str", REQUIRED, "A regular expression (multi-line); its first group, or the whole match, is the value."),
+                "ref": Key("str", "", "Read the file at this git ref instead of the checkout; @pin is the deps commit [deps] pin names, @deps the --deps-ref."),
+                "match": Key("str", "equal", "`equal`: every value is the row's; `prefix`: each value is the row's version or a dotted prefix of it; `set`: the values are exactly the rows'; `in`: one value is the row's."),
+                "expect": Key("str", "{version}", "The row's side of the comparison, over {version}, {sha256}, {url}, {name} and {platform}."),
+                "platform": Key("str", "", "Only the row for this platform (or `any`); empty: every row."),
+                "first": Key("bool", False, "Only the first row of the item."),
+            },
+        ),
+        "venv": Key(
+            "tables",
+            None,
+            "A Python virtual environment installed from a hashed requirements file.",
+            {"item": Key("str", REQUIRED, "The row it is named for, `GROUP NAME`."), "requirements": Key("str", REQUIRED, "The requirements file, relative to the repository.")},
+        ),
+        "post": Key(
+            "tables",
+            None,
+            "A command run once in a git item's directory after it is cloned.",
+            {
+                "item": Key("str", REQUIRED, "The git row, `GROUP NAME`."),
+                "run": Key("strs", REQUIRED, "The command, its first word relative to the item's directory."),
+                "stamp": Key("str", ".build-post", "A file in the directory that records the command ran."),
+            },
+        ),
+        "system": Key("table", None, "System packages, which are only checked.", {"print": Key("map", {}, "What to install, by os (linux, macos, windows): the text `--print-system` prints.")}),
+    },
+)
+
+
+def split_item(row: str) -> tuple[str, str]:
+    group, _, name = row.partition(" ")
+    return group, name.strip()
+
+
+def lint_lock(ctx: Ctx, raw: bytes, name: str) -> tuple[list[Item], list[str]]:
+    """The rows of a lock and a line for each way they are not a well-formed lock."""
+    cfg = ctx.cfg.sdk
+    errors: list[str] = []
+
+    def error(message: str, line: int | None = None) -> None:
+        errors.append(f"{name}:{line}: {message}" if line else f"{name}: {message}")
+
+    if len(raw) > cfg.max_bytes:
+        error(f"{len(raw)} bytes, over the {cfg.max_bytes} a text lock should need")
+    if b"\r" in raw:
+        error("has CR line endings")
+    items: list[Item] = []
+    seen: dict[tuple[str, str, str, str], int] = {}
+    groups = set(cfg.groups)
+    for number, text in enumerate(raw.decode("utf-8").split("\n"), 1):
+        text = text.strip()
+        if not text or text.startswith("#"):
+            continue
+        fields = text.split()
+        if len(fields) != 6:
+            error(f"expected 6 fields, found {len(fields)}", number)
+            continue
+        item = Item(number, *fields)
+        items.append(item)
+        if item.group != "system" and item.group not in groups:
+            error(f"unknown group {item.group}", number)
+        if item.platform != "any" and item.platform not in cfg.platforms:
+            error(f"unknown platform {item.platform}", number)
+        if item.sha256 != "-" and not HEX64.match(item.sha256):
+            error(f"hash of {item.name} is not 64 hex characters: {item.sha256}", number)
+        if item.url != "-" and not re.match(r"^(https|docker)://\S+$", item.url):
+            error(f"url of {item.name} is not https or docker: {item.url}", number)
+        if FLOATING.match(item.version):
+            error(f"{item.name} floats: {item.version}", number)
+        if item.group == "system":
+            if item.sha256 != "-" or item.url != "-":
+                error(f"system item {item.name} has a hash or a url", number)
+            if item.version not in groups:
+                error(f"system item {item.name} names no group: {item.version}", number)
+        elif item.url.startswith("https://"):
+            if item.url.endswith(".git"):
+                if not HEX40.match(item.version):
+                    error(f"git item {item.name} is not at a commit: {item.version}", number)
+            elif item.sha256 == "-":
+                error(f"download {item.name} has no hash", number)
+        if item.group == "core" and item.name == "rust" and not re.match(r"^\d+\.\d+\.\d+$", item.version):
+            error(f"rust is not an exact version: {item.version}", number)
+        key = (item.group, item.name, item.version, item.platform)
+        if key in seen:
+            error(f"same item as line {seen[key]}", number)
+        seen[key] = number
+    for row in cfg.all_platforms:
+        group, item_name = split_item(row)
+        have = {i.platform for i in items if i.group == group and i.name == item_name}
+        missing = set(cfg.platforms) - have
+        if missing:
+            error(f"{group} {item_name} is missing {', '.join(sorted(missing))}")
+    return items, errors
+
+
+def read_at(ctx: Ctx, ref: str | None, path: str) -> str | None:
+    """A file of the checkout, or of a commit; None when it is not there."""
+    if ref is None:
+        target = ctx.root / path
+        return target.read_bytes().decode("utf-8") if target.is_file() else None
+    done = subprocess.run(["git", "-C", str(ctx.root), "show", f"{ref}:{path}"], capture_output=True)
+    return done.stdout.decode("utf-8") if done.returncode == 0 else None
+
+
+def pin_commit(ctx: Ctx) -> tuple[str | None, int | None]:
+    """(the deps commit `[deps] pin` names, its line); None when no pin is configured."""
+    pin = ctx.cfg.deps.pin
+    if not pin.lock:
+        return None, None
+    path = ctx.root / pin.lock
+    if not path.is_file():
+        raise Problem(f"[deps] pin: {pin.lock}: no such file")
+    group, name = split_item(pin.item)
+    rows = [i for i in parse_lock_items(path.read_text(encoding="utf-8"), path.name) if i.group == group and i.name == name]
+    if len(rows) != 1:
+        raise Problem(f"{pin.lock}: expected one `{pin.item}` row, found {len(rows)}")
+    return rows[0].version, rows[0].line
+
+
+def agree_problems(ctx: Ctx, items: list[Item], lock_name: str, pin: str | None, deps_ref: str, notes: list[str]) -> list[str]:
+    found: list[str] = []
+    for rule in ctx.cfg.sdk.agree:
+        group, name = split_item(rule.item)
+        rows = [i for i in items if i.group == group and i.name == name and (not rule.platform or i.platform in (rule.platform, "any"))]
+        if rule.first:
+            rows = rows[:1]
+        if not rows:
+            found.append(f"{lock_name}: agree {rule.item}: the lock has no such row")
+            continue
+        line = f"{lock_name}:{rows[0].line}"
+        if rule.ref == "@pin" and pin is None:
+            found.append(f"{line}: agree {rule.item}: ref @pin needs [deps] pin")
+            continue
+        ref = {"": None, "@pin": pin, "@deps": deps_ref}.get(rule.ref, rule.ref)
+        where = rule.file + (f" at {ref[:12] if HEX40.match(ref or '') else ref}" if ref else "")
+        text = read_at(ctx, ref, rule.file)
+        if text is None:
+            if ref:
+                notes.append(f"no {rule.file} at {ref}: not checked")
+            else:
+                found.append(f"{line}: {rule.file}: no such file")
+            continue
+        expected = [rule.expect.format(version=r.version, sha256=r.sha256, url=r.url, name=r.name, platform=r.platform) for r in rows]
+        values = [m.group(1) if m.re.groups else m.group(0) for m in re.finditer(rule.pattern, text, re.MULTILINE)]
+        if not values:
+            found.append(f"{line}: {where} has no match for {rule.pattern}")
+            continue
+        mode = rule.match
+        if mode == "equal":
+            if len(expected) != 1:
+                found.append(f"{line}: agree {rule.item}: `equal` needs one row, the lock has {len(expected)}; use platform, first or set")
+            elif any(v != expected[0] for v in values):
+                found.append(f"{line}: {where} has {sorted(set(values))}, the lock {expected[0]}")
+        elif mode == "prefix":
+            for v in sorted(set(values)):
+                if not any(e == v or e.startswith(v + ".") for e in expected):
+                    found.append(f"{line}: {where} has {v}, which is not in the lock's {expected}")
+        elif mode == "set":
+            if set(values) != set(expected):
+                found.append(f"{line}: {where} names {sorted(set(values))}, the lock {sorted(set(expected))}")
+        elif mode == "in":
+            if expected[0] not in values:
+                found.append(f"{line}: {where} does not name {expected[0]}")
+        else:
+            found.append(f"{line}: agree {rule.item}: unknown match {mode!r}")
+    return found
+
+
+def upstream_sha256(item: Item) -> str:
+    """What the item's publisher says its download hashes to (the only way to notice a well-formed
+    hash that was changed)."""
+    if item.name == "rustup-init":
+        return fetch(item.url + ".sha256").decode("utf-8").split()[0]
+    base = item.url.rsplit("/", 1)[1]
+    if item.url.startswith("https://nodejs.org/dist/"):
+        folder = item.url.rsplit("/", 1)[0]
+        rows = fetch(folder + "/SHASUMS256.txt").decode("utf-8").splitlines()
+        return {r.split()[1]: r.split()[0] for r in rows if len(r.split()) == 2}.get(base, "")
+    found = re.match(r"^https://github\.com/([^/]+)/([^/]+)/releases/download/([^/]+)/", item.url)
+    if found:
+        release = json.loads(fetch(f"https://api.github.com/repos/{found[1]}/{found[2]}/releases/tags/{found[3]}"))
+        for asset in release["assets"]:
+            if asset["name"] == base:
+                return str(asset.get("digest", "")).removeprefix("sha256:")
+    return ""
+
+
+def online_problems(items: list[Item], lock_name: str) -> list[str]:
+    found = []
+    for item in items:
+        if item.group == "system" or not item.url.startswith("https://") or item.sha256 == "-" or item.url.endswith(".git"):
+            continue
+        known = item.name == "rustup-init" or item.url.startswith("https://nodejs.org/dist/") or item.url.startswith("https://github.com/")
+        if not known:
+            continue
+        expected = upstream_sha256(item)
+        if expected != item.sha256:
+            found.append(f"{lock_name}:{item.line}: {item.name} {item.platform}: upstream says {expected}")
+    return found
+
+
+def sdk_check(ctx: Ctx, args: argparse.Namespace) -> int:
+    cfg = ctx.cfg.sdk
+    path = ctx.root / cfg.lock
+    if not path.is_file():
+        raise Problem(f"{cfg.lock}: no such file")
+    items, found = lint_lock(ctx, path.read_bytes(), path.name)
+    notes: list[str] = []
+    pin, pin_line = pin_commit(ctx)
+    if pin is not None:
+        if not HEX40.match(pin):
+            found.append(f"{path.name}:{pin_line}: the deps pin is not a commit: {pin}")
+        else:
+            lock_file = ctx.root / ctx.cfg.deps.cargo_lock
+            more, extra = ref_problems(ctx, read_lock(lock_file), pin)
+            found += [f"{ctx.cfg.deps.pin.lock}:{pin_line}: {line}" for line in more]
+            notes += extra
+    deps_ref = args.deps_ref or f"origin/{ctx.cfg.deps.branch}"
+    found += agree_problems(ctx, items, path.name, pin, deps_ref, notes)
+    if args.online:
+        found += online_problems(items, path.name)
+    for note in notes:
+        print(f"note: {note}")
+    if found:
+        raise Problem("\n".join(found))
+    print(f"ok: {len(items)} items in {path.name}")
+    return 0
+
+
+# --- sdk install --------------------------------------------------------------------------------------------------
+
+
+def host_platform() -> str:
+    """The machine's platform, `OS-ARCH`; $BUILD_SDK_PLATFORM names another.
+
+    On Windows the process's own architecture can be an emulated one, so the machine's is read.
+    """
+    if os.environ.get("BUILD_SDK_PLATFORM"):
+        return os.environ["BUILD_SDK_PLATFORM"]
+    system = {"Windows": "windows", "Linux": "linux", "Darwin": "macos"}.get(platform.system())
+    machine = (os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE") or "") if system == "windows" else ""
+    machine = (machine or platform.machine()).lower()
+    arch = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(machine)
+    if system is None or arch is None:
+        raise Problem(f"no SDK is listed for {platform.system()} on {machine or 'an unknown processor'}")
+    return f"{system}-{arch}"
+
+
+def run_tool(command: list[str], env: dict[str, str] | None = None, cwd: Path | None = None) -> None:
+    """Runs a tool, its output shown; a non-zero exit is a Problem."""
+    done = subprocess.run(command, env=env, cwd=cwd)
+    if done.returncode != 0:
+        raise Problem(f"{' '.join(str(c) for c in command)} exited with {done.returncode}")
+
+
+def capture_tool(command: list[str], env: dict[str, str] | None = None) -> tuple[int, str]:
+    """(exit code, stdout) of a tool, or (127, '') when it is not there."""
+    try:
+        done = subprocess.run(command, env=env, capture_output=True, text=True)
+    except OSError:
+        return 127, ""
+    return done.returncode, done.stdout
+
+
+def unpack(archive: Path, dest: Path, strip: int = 1) -> None:
+    name = archive.name.lower()
+    if name.endswith(".zip"):
+        with zipfile.ZipFile(archive) as zf:
+            safe_unzip(zf, dest, strip)
+    elif name.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2")):
+        with tarfile.open(archive, "r:*") as tar:
+            safe_extract(tar, dest, links="inside", strip=strip)
+    else:
+        raise Problem(f"cannot unpack {archive.name}: only .zip, .tar.gz, .tar.xz and .tar.bz2")
+
+
+class Installer:
+    """What `sdk install` does for one platform, prefix and set of groups."""
+
+    def __init__(self, ctx: Ctx, items: list[Item], plat: str, prefix: Path, groups: list[str], check: bool) -> None:
+        self.ctx, self.plat, self.prefix, self.groups, self.check = ctx, plat, prefix, groups, check
+        self.windows = plat.startswith("windows")
+        self.triple = TRIPLES[plat]
+        self.missing = False
+        self.paths: list[str] = []
+        self.dirs: dict[str, Path] = {}
+        self.items = [i for i in items if i.platform in (plat, "any")]
+        self.rustup_home = prefix / "rust" / "rustup"
+        self.cargo_home = prefix / "rust" / "cargo"
+        self.exe = ".exe" if self.windows else ""
+        self.rustup = self.cargo_home / "bin" / f"rustup{self.exe}"
+        self.tool_env = {**os.environ, "RUSTUP_HOME": str(self.rustup_home), "CARGO_HOME": str(self.cargo_home)}
+
+    # reporting
+    def report(self, what: str, state: str) -> None:
+        print(f"{what:<32} {state}")
+
+    def need(self, what: str, state: str) -> None:
+        self.missing = True
+        self.report(what, state)
+
+    def rows(self, name: str, group: str | None = None) -> list[Item]:
+        return [i for i in self.items if i.name == name and i.group != "system" and i.group in self.groups and (group is None or i.group == group)]
+
+    # verified downloads
+    def kept(self, item: Item) -> Path:
+        return self.prefix / "dl" / f"{item.name}-{item.version}" / item.url.rsplit("/", 1)[1]
+
+    def verify_kept(self, item: Item) -> None:
+        """A kept copy that changed on disk is refused and removed rather than trusted."""
+        path = self.kept(item)
+        if path.is_file() and sha256(path.read_bytes()) != item.sha256:
+            actual = sha256(path.read_bytes())
+            path.unlink()
+            raise Problem(f"refused and removed {path}\n  the lock says {item.sha256}\n  the file was  {actual}")
+
+    def fetch_verified(self, item: Item) -> Path:
+        self.verify_kept(item)
+        path = self.kept(item)
+        if path.is_file():
+            return path
+        self.report(f"{item.name} {item.version}", f"fetching {item.url}")
+        self.prefix.mkdir(parents=True, exist_ok=True)
+        scratch = Path(tempfile.mkdtemp(prefix="tmp.", dir=self.prefix))
+        try:
+            data = fetch(item.url)
+            if sha256(data) != item.sha256:
+                raise Problem(f"refused {item.url}\n  the lock says {item.sha256}\n  the download  {sha256(data)}")
+            partial = scratch / path.name
+            partial.write_bytes(data)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(partial, path)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        return path
+
+    # rust
+    def rustup_ready(self, version: str) -> bool:
+        if not self.rustup.is_file():
+            return False
+        code, out = capture_tool([str(self.rustup), "--version"], self.tool_env)
+        return code == 0 and out.split()[1:2] == [version]
+
+    def toolchain_ready(self, version: str, components: list[str], targets: list[str]) -> bool:
+        """Asks only the prefix, so a run with nothing to do stays off the network."""
+        if not self.rustup.is_file():
+            return False
+        code, out = capture_tool([str(self.rustup), "toolchain", "list"], self.tool_env)
+        if code or not any(row.startswith(f"{version}-{self.triple}") for row in out.splitlines()):
+            return False
+        code, out = capture_tool([str(self.rustup), "component", "list", "--toolchain", version, "--installed"], self.tool_env)
+        if code or not all(any(row.startswith(c) for row in out.splitlines()) for c in components):
+            return False
+        code, out = capture_tool([str(self.rustup), "target", "list", "--toolchain", version, "--installed"], self.tool_env)
+        return not code and all(t in out.split() for t in targets)
+
+    def rust(self) -> None:
+        init = [i for i in self.rows("rustup-init")]
+        toolchains = self.rows("rust")
+        if not toolchains:
+            return
+        if len(init) != 1:
+            raise Problem(f"the lock needs one rustup-init row for {self.plat}, it has {len(init)}")
+        init = init[0]
+        components = [i.version for i in self.rows("rust-component")]
+        targets = [i.version for i in self.rows("rust-target")]
+        numeric = [t.version for t in toolchains if re.match(r"^\d+\.\d+\.\d+$", t.version)]
+        if self.check:
+            if self.rustup_ready(init.version):
+                self.report(f"rustup {init.version}", "ok")
+            else:
+                self.need(f"rustup {init.version}", f"missing, would fetch {init.url}")
+        else:
+            self.verify_kept(init)
+            if self.rustup_ready(init.version):
+                self.report(f"rustup {init.version}", "ok")
+            else:
+                file = self.fetch_verified(init)
+                file.chmod(file.stat().st_mode | 0o111)
+                run_tool([str(file), "-y", "--no-modify-path", "--default-toolchain", "none", "--profile", "minimal"], {**self.tool_env, "RUSTUP_INIT_SKIP_PATH_CHECK": "yes"})
+                run_tool([str(self.rustup), "set", "auto-self-update", "disable"], self.tool_env)
+                self.report(f"rustup {init.version}", "installed")
+        for toolchain in toolchains:
+            comps, tgts = (components, targets) if toolchain.version in numeric else ([], [])
+            label = f"rust {toolchain.version}"
+            if self.toolchain_ready(toolchain.version, comps, tgts):
+                self.report(label, "ok")
+            elif self.check:
+                self.need(label, f"missing, rustup would fetch it with {' '.join(comps + tgts)}".rstrip())
+            else:
+                command = [str(self.rustup), "toolchain", "install", toolchain.version, "--profile", "minimal", "--no-self-update"]
+                for c in comps:
+                    command += ["-c", c]
+                for t in tgts:
+                    command += ["-t", t]
+                run_tool(command, self.tool_env)
+                self.report(label, "installed")
+        if numeric and not self.check:
+            code, out = capture_tool([str(self.rustup), "default"], self.tool_env)
+            if not out.startswith(f"{numeric[0]}-{self.triple}"):
+                run_tool([str(self.rustup), "default", f"{numeric[0]}-{self.triple}"], self.tool_env)
+        for tool in [i for i in self.items if i.name.startswith("cargo-") and i.group in self.groups]:
+            self.cargo_tool(tool, numeric[0] if numeric else None)
+        self.paths.append(str(self.cargo_home / "bin"))
+
+    def cargo_tool(self, tool: Item, stable: str | None) -> None:
+        binary = self.cargo_home / "bin" / f"{tool.name}{self.exe}"
+        code, out = capture_tool([str(binary), "--version"], self.tool_env) if binary.is_file() else (1, "")
+        label = f"{tool.name} {tool.version}"
+        if code == 0 and out.split()[1:2] == [tool.version]:
+            self.report(label, "ok")
+        elif self.check:
+            self.need(label, "missing, cargo would compile it")
+        else:
+            if stable is None:
+                raise Problem(f"{tool.name} needs a stable rust row to be installed with")
+            run_tool([str(self.rustup), "run", stable, "cargo", "install", tool.name, "--version", tool.version, "--locked"], self.tool_env)
+            self.report(label, "installed")
+
+    # clang for ring on Windows ARM64
+    def clang_dir(self) -> Path | None:
+        """None when a clang is already on PATH or Visual Studio has one; else the locked LLVM's."""
+        if shutil.which("clang"):
+            return None
+        vswhere = Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+        if vswhere.is_file():
+            code, out = capture_tool([str(vswhere), "-products", "*", "-prerelease", "-requires", "Microsoft.VisualStudio.Component.VC.Llvm.Clang", "-property", "installationPath"])
+            for line in out.splitlines():
+                directory = Path(line.strip()) / "VC" / "Tools" / "Llvm" / "ARM64" / "bin"
+                if (directory / "clang.exe").is_file():
+                    return directory
+        llvm = self.rows("llvm")
+        return self.prefix / "llvm" / llvm[0].version / "bin" if llvm else None
+
+    def llvm(self) -> None:
+        rows = self.rows("llvm")
+        if not rows or self.plat != "windows-arm64":
+            return
+        item = rows[0]
+        directory = self.clang_dir()
+        if directory is None or not str(directory).startswith(str(self.prefix / "llvm")):
+            return
+        label = f"llvm {item.version}"
+        self.verify_kept(item)
+        if (directory / "clang.exe").is_file():
+            self.report(label, "ok")
+        elif self.check:
+            self.need(label, f"no clang found, would fetch {item.url}")
+            return
+        else:
+            file = self.fetch_verified(item)
+            partial = directory.parent.with_name(directory.parent.name + ".partial")
+            shutil.rmtree(partial, ignore_errors=True)
+            partial.mkdir(parents=True)
+            unpack(file, partial, 1)
+            shutil.rmtree(directory.parent, ignore_errors=True)
+            os.replace(partial, directory.parent)
+            self.report(label, "installed")
+        self.paths.append(str(directory))
+
+    # archives
+    def archives(self) -> None:
+        for item in self.items:
+            if (
+                item.group not in self.groups or item.group == "system" or not item.url.startswith("https://") or item.url.endswith(".git")
+                or item.sha256 == "-" or item.name in ("rustup-init", "llvm") or item.name.startswith("cargo-")
+            ):
+                continue
+            directory = self.prefix / item.name / item.version
+            label = f"{item.name} {item.version}"
+            self.dirs[f"{item.group} {item.name}"] = directory
+            if directory.is_dir():
+                self.verify_kept(item)
+                self.report(label, "ok")
+            elif self.check:
+                self.need(label, f"missing, would fetch {item.url}")
+                continue
+            else:
+                file = self.fetch_verified(item)
+                partial = directory.with_name(directory.name + ".partial")
+                shutil.rmtree(partial, ignore_errors=True)
+                partial.mkdir(parents=True)
+                unpack(file, partial, 1)
+                os.replace(partial, directory)
+                self.report(label, "installed")
+            self.paths.append(str(directory / "bin" if (directory / "bin").is_dir() else directory))
+
+    # git items
+    def git_items(self) -> None:
+        cfg = self.ctx.cfg.sdk
+        for item in self.items:
+            if item.group not in self.groups or item.group == "system" or not item.url.endswith(".git") or not item.url.startswith("https://"):
+                continue
+            url = os.environ.get(f"BUILD_SDK_GIT_URL_{re.sub(r'[^A-Za-z0-9]', '_', item.name).upper()}") or cfg.git_urls.get(item.name) or item.url
+            directory = self.prefix / "git" / item.name / item.version[:12]
+            self.dirs[f"{item.group} {item.name}"] = directory
+            label = f"{item.name} {item.version[:12]}"
+            ready = (directory / ".git").exists() and git_ok("rev-parse", "HEAD", cwd=directory) and run_git("rev-parse", "HEAD", cwd=directory) == item.version
+            if ready:
+                self.report(label, "ok")
+            elif self.check:
+                self.need(label, f"missing, would clone {url} at {item.version}")
+                continue
+            else:
+                partial = directory.with_name(directory.name + ".partial")
+                shutil.rmtree(partial, ignore_errors=True)
+                partial.parent.mkdir(parents=True, exist_ok=True)
+                self.report(label, f"cloning {url}")
+                # A commit-only clone fetches just the trees and files of this revision, and keeps
+                # the history a tool that reads tags and commits needs.
+                run_git("-c", "core.autocrlf=false", "clone", "-q", "--filter=tree:0", "--no-checkout", url, str(partial))
+                run_git("-C", str(partial), "checkout", "-q", "--detach", item.version)
+                shutil.rmtree(directory, ignore_errors=True)
+                os.replace(partial, directory)
+                self.report(label, "installed")
+            for post in cfg.post:
+                if split_item(post.item) != (item.group, item.name):
+                    continue
+                stamp = directory / post.stamp
+                if stamp.exists():
+                    continue
+                if self.check:
+                    self.need(f"{item.name} {post.run[0]}", "has not run")
+                    continue
+                command = list(post.run)
+                exe = directory / command[0]
+                if self.windows:
+                    exe = next((c for c in (exe, exe.with_suffix(".bat"), exe.with_suffix(".cmd"), exe.with_suffix(".exe")) if c.exists()), exe)
+                run_tool([str(exe), *command[1:]], self.tool_env, cwd=directory)
+                stamp.write_text("", encoding="utf-8")
+                self.report(f"{item.name} {post.run[0]}", "ran")
+
+    # Python virtual environments
+    def venvs(self) -> None:
+        for spec in self.ctx.cfg.sdk.venv:
+            group, name = split_item(spec.item)
+            rows = [i for i in self.items if i.group == group and i.name == name]
+            if group not in self.groups or not rows:
+                continue
+            requirements = self.ctx.root / spec.requirements
+            venv = self.prefix / "venv" / f"{name}-{rows[0].version}"
+            scripts = venv / ("Scripts" if self.windows else "bin")
+            copy = venv / "requirements.txt"
+            label = f"{name} {rows[0].version}"
+            if copy.is_file() and requirements.is_file() and copy.read_bytes() == requirements.read_bytes():
+                self.report(label, "ok")
+            elif self.check:
+                self.need(label, "missing, pip would fetch what the requirements list, hash-checked")
+                continue
+            else:
+                shutil.rmtree(venv, ignore_errors=True)
+                venv.parent.mkdir(parents=True, exist_ok=True)
+                run_tool([sys.executable, "-m", "venv", str(venv)])
+                run_tool([str(scripts / f"python{self.exe}"), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "--require-hashes", "-r", str(requirements)])
+                shutil.copyfile(requirements, copy)
+                self.report(label, "installed")
+            self.dirs[f"{group} {name}"] = venv
+            self.paths.append(str(scripts))
+
+    def docker_items(self) -> None:
+        for item in self.items:
+            if item.group in self.groups and item.url.startswith("docker://"):
+                image = f"{item.url.removeprefix('docker://')}:{item.version}@sha256:{item.sha256}"
+                self.report(f"{item.name} image", f"{image}, left to your container engine")
+
+    # system items are only checked
+    def system_found(self, name: str) -> bool:
+        if name.startswith("pkg:"):
+            return capture_tool(["pkg-config", "--exists", name[4:]])[0] == 0
+        if name == "xcodebuild":
+            return capture_tool(["xcodebuild", "-version"])[0] == 0
+        if name == "docker-or-podman":
+            return bool(shutil.which("docker") or shutil.which("podman"))
+        if name == "python3":
+            return bool(shutil.which("python3") or shutil.which("python") or shutil.which("py"))
+        if name == "windows-sdk":
+            kits = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / "Windows Kits" / "10" / "Include"
+            return kits.is_dir()
+        if name.startswith("Microsoft.VisualStudio."):
+            vswhere = Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+            if not vswhere.is_file():
+                return False
+            code, out = capture_tool([str(vswhere), "-products", "*", "-prerelease", "-requires", name, "-property", "installationPath"])
+            return bool(out.strip())
+        return bool(shutil.which(name))
+
+    def system(self) -> None:
+        absent = False
+        for item in self.items:
+            if item.group != "system" or item.version not in self.groups:
+                continue
+            if self.system_found(item.name):
+                self.report(f"system {item.name}", "found")
+            else:
+                absent = True
+                self.report(f"system {item.name}", "MISSING; see --print-system")
+        if absent:
+            self.missing = self.missing or self.check
+            print("build.py: some of the system group is missing. Nothing here installs it:", file=sys.stderr)
+            print(system_text(self.ctx, self.plat), file=sys.stderr)
+
+    # env.sh and env.ps1
+    def expand(self, text: str) -> str:
+        text = text.replace("{prefix}", str(self.prefix))
+        return re.sub(r"\{dir:([^}]+)\}", lambda m: str(self.dirs.get(m[1].strip(), self.prefix / "missing" / m[1].strip())), text)
+
+    def write_env(self) -> None:
+        cfg = self.ctx.cfg.sdk
+        variables = {"BUILD_SDK_HOME": str(self.prefix)}
+        if self.rustup.is_file():
+            variables["RUSTUP_HOME"] = str(self.rustup_home)
+            variables["CARGO_HOME"] = str(self.cargo_home)
+        for key, value in cfg.env.items():
+            variables[key] = self.expand(value)
+        paths = [self.expand(p) for p in cfg.path] + [p for p in reversed(self.paths)]
+        paths = [p for p in dict.fromkeys(paths) if Path(p).exists()]
+        for value in [*variables.values(), *paths]:
+            if "'" in value:
+                raise Problem(f"a value containing a single quote cannot be written to env.sh: {value}")
+        sep = ";" if self.windows else ":"
+        sh = ["# Written by tools/build.py. Source it: . " + str(self.prefix / "env.sh")]
+        ps1 = ["# Written by tools/build.py. Source it: . " + str(self.prefix / "env.ps1")]
+        for key, value in variables.items():
+            sh.append(f"export {key}='{value}'")
+            ps1.append(f"$env:{key} = '{value}'")
+        if paths:
+            sh.append("export PATH='" + ":".join(paths) + "':\"$PATH\"")
+            ps1.append("$env:PATH = '" + sep.join(paths) + sep + "' + $env:PATH")
+        for name, lines in (("env.sh", sh), ("env.ps1", ps1)):
+            (self.prefix / f"{name}.partial").write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
+            os.replace(self.prefix / f"{name}.partial", self.prefix / name)
+        self.report("env", f"{self.prefix / 'env.sh'}, {self.prefix / 'env.ps1'}")
+
+
+def system_text(ctx: Ctx, plat: str) -> str:
+    text = ctx.cfg.sdk.system.print.get(plat.split("-")[0])
+    return text.rstrip("\n") if text else f"(no system package instructions are configured for {plat.split('-')[0]}; see [sdk.system] print)"
+
+
+def sdk_install(ctx: Ctx, args: argparse.Namespace) -> int:
+    cfg = ctx.cfg.sdk
+    plat = args.platform or host_platform()
+    if plat not in TRIPLES:
+        raise Usage(f"unknown platform {plat}; one of {', '.join(sorted(TRIPLES))}")
+    if args.print_system:
+        print(system_text(ctx, plat))
+        return 0
+    groups = [g for g in (args.groups.split(",") if args.groups else cfg.install) if g]
+    unknown = [g for g in groups if g not in cfg.groups]
+    if unknown:
+        raise Usage(f"unknown group {', '.join(unknown)}; the groups are {', '.join(cfg.groups)}")
+    path = ctx.root / cfg.lock
+    if not path.is_file():
+        raise Problem(f"{cfg.lock}: no such file")
+    items, errors = lint_lock(ctx, path.read_bytes(), path.name)
+    if errors:
+        raise Problem("\n".join(errors[:5]) + (f"\n({len(errors)} problems in all; run `sdk check`)" if len(errors) > 5 else ""))
+    prefix = Path(args.prefix) if args.prefix else Path(os.environ["BUILD_SDK_HOME"]) if os.environ.get("BUILD_SDK_HOME") else Path.home() / f".{ctx.root.name}-sdk"
+    prefix = prefix.resolve() if prefix.is_absolute() else (Path.cwd() / prefix).resolve()
+    install = Installer(ctx, items, plat, prefix, groups + ["system"], args.check)
+    if not args.check:
+        (prefix / "dl").mkdir(parents=True, exist_ok=True)
+    install.report("prefix", str(prefix))
+    install.report("platform", plat)
+    install.rust()
+    install.llvm()
+    install.archives()
+    install.git_items()
+    install.venvs()
+    install.docker_items()
+    install.system()
+    if args.check:
+        return 1 if install.missing else 0
+    install.write_env()
+    return 0
+
+
+def add_sdk(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser("sdk", help="the SDK lock: lint it, hold the repository to it, install it")
+    commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
+    check = commands.add_parser("check", help="lint the lock, cover the deps pin, and compare each [[sdk.agree]] fact")
+    check.add_argument("--online", action="store_true", help="also compare each download's hash with what its publisher says")
+    check.add_argument("--deps-ref", metavar="REF", help="where @deps reads files (default: origin/ plus [deps] branch)")
+    check.set_defaults(run=sdk_check)
+    install = commands.add_parser("install", help="install what the lock names under one prefix, verified, by version")
+    install.add_argument("--groups", metavar="A,B", help="the groups to install (default: [sdk] install)")
+    install.add_argument("--prefix", metavar="DIR", help="where (default: $BUILD_SDK_HOME, else ~/.REPO-sdk)")
+    install.add_argument("--check", action="store_true", help="install nothing: report what is missing and exit 1 if anything is")
+    install.add_argument("--print-system", action="store_true", help="print the system packages to install, and nothing else")
+    install.add_argument("--platform", metavar="OS-ARCH", help="act as this platform (default: this machine, or $BUILD_SDK_PLATFORM)")
+    install.set_defaults(run=sdk_install)
+
+
+SECTIONS.append(add_sdk)
 
 # @@END-OF-SECTIONS@@
 

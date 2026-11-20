@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   a tree, a commit or all of history, with `[deps] allow` for the exceptions.
 - release: the Flutter section of `build.py`: pub packages (`[deps.pub]`) and CDN files (`[deps.cdn]`) on the deps branch with a
   coverage check of `pubspec.lock`, `offline plan --json`, `flutter junctions` and `flutter precache-check`.
+- release: `build.py sdk check` (lint an SDK lock, cover the deps pin, compare `[[sdk.agree]]` facts, `--online` publisher
+  hashes) and `build.py sdk install` (rustup, toolchains, archives, git items, virtual environments, `env.sh` and `env.ps1`,
+  every download verified; `--check` and `--print-system`).
 - A `Test` workflow running the release overlay's tests on Linux, Windows and macOS at Python 3.11 and 3.14.
 
 ### Changed

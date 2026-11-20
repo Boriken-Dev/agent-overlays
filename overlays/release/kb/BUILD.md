@@ -73,3 +73,26 @@ A section the configuration leaves out is off.
 - `flutter junctions` recreates the Windows plugin links `flutter build windows` needs, as directory junctions that need no
   Developer Mode; `flutter precache-check` compares a Flutter checkout's version, engine stamp and Dart with the SDK lock rows
   named in `[flutter]`.
+
+## The SDK lock (`sdk`)
+
+`[sdk] lock` (default `tools/sdk.lock`) is the only file to trust for what a build is made with: one row per line,
+`GROUP NAME VERSION OS-ARCH|any SHA256|- URL|-`, space separated, `#` for a comment, so a shell can read it without a parser. A
+download has a hash, a git item (a URL ending in `.git`) is at a commit, a `system` row names what is only checked (its
+version column is the group that needs it), and no version floats (`latest`, `stable`, `main`).
+
+- `sdk check [--online] [--deps-ref REF]` lints the lock, covers the `[deps] pin` commit with `deps check --ref`, and compares
+  every `[[sdk.agree]]` rule: a regular expression over a file of the repository (or of a git ref, `@pin` for the deps commit,
+  `@deps` for `--deps-ref`) whose value must equal, prefix-match, set-match or be among the lock's rows (`match`). That is how
+  `rust-version`, a pinned nightly in workflows, a container digest, `ARG`s in a Dockerfile or a requirements file are held to
+  the lock. `--online` compares each download's hash with what its publisher says (rustup's `.sha256`, Node's
+  `SHASUMS256.txt`, a GitHub release asset's `digest`).
+- `sdk install [--groups a,b] [--prefix DIR] [--check] [--print-system] [--platform OS-ARCH]` installs the groups under one
+  prefix (default `$BUILD_SDK_HOME`, else `~/.REPO-sdk`) and never touches the shell profile, PATH or the system, and never
+  elevates: rustup without profile edits, each `rust` row as a toolchain (numeric versions with the `rust-component` and
+  `rust-target` rows; a `nightly-DATE` without), `cargo-*` rows with `cargo install --locked`, archives unpacked member by
+  member by version, git items cloned at their commit (`[[sdk.post]]` runs a command once in one), `venv` items from a hashed
+  requirements file, the locked LLVM on Windows ARM64 only when no clang is found, `docker://` rows reported, and
+  `env.sh`/`env.ps1` written (`[sdk.env]` and `[sdk] path` add variables and directories). Every download is verified against
+  the lock before it is used. `--check` installs nothing and exits 1 when something is missing; `system` rows are only checked,
+  and `--print-system` prints `[sdk.system] print` for the platform.
