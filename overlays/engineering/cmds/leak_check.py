@@ -57,6 +57,20 @@ The classes are ``.agents path``, ``'Phase N'``, ``decision id``,
 ``plan basename`` and ``plan label``; any other name is exit 2. Exempted hits
 are still counted per file (``EXEMPT <file>: N <class>``).
 
+Strict mode: ``[agents_paths]``
+-------------------------------
+A ``[agents_paths]`` table in the same file turns on a stricter reading of the ``.agents`` hits::
+
+    [agents_paths]
+    allow = ["docs/hooks.md", "crates/providers/**"]
+
+A path into the private store (``.agents/`` followed by ``plans``, ``findings``, ``decisions``, ``kb``,
+``tools``, ``references``, ``scratch``, ``reviews``, ``assets``, ``flows``, ``ideas``, ``research``, ``skills``,
+``notes``, ``NOTES``, ``TODO`` or ``AGENTS``) is then a ``private store path`` hit in every file, and neither
+``exempt`` nor ``allow`` waives it. A plain mention of the directory is still an ``.agents path`` hit, except in
+a file matching an ``allow`` glob (``**`` crosses directories, ``*`` does not, a trailing ``/`` means everything
+below it): a tool that keeps its own files in a directory of that name may describe it there.
+
 The pattern file
 ----------------
 ``$DOTAGENTS_AUDIT_PATTERNS``, else ``audit_patterns.local.json`` in the agent
@@ -181,6 +195,12 @@ MANIFEST_IN_EXCLUDE_RE = re.compile(
 EXEMPTIONS_NAME = "leak-check.toml"
 # The hit classes a repository may exempt. Personal markers, infra rules and
 # attribution trailers are never exemptable.
+# `.agents/` followed by one of the private store's directories or files.
+PRIVATE_STORE_RE = re.compile(
+    r"(?<![\w.)])(?<!from )\.agents[/\\]"
+    r"(?:plans|findings|decisions|kb|tools|references|scratch|reviews|assets|flows|ideas|research|skills|notes|"
+    r"NOTES|TODO|AGENTS)\b")
+PRIVATE_STORE_HIT = "private store path"
 EXEMPTABLE = (".agents path", "'Phase N'", "decision id", "plan basename",
               "plan label")
 HIT_RE = re.compile(r"^(?P<rel>.+?):(?P<lineno>[0-9]+): (?P<what>.*)$")
@@ -515,6 +535,54 @@ def load_exemptions(repo: Path) -> tuple[set[str], Path | None]:
     return set(raw), path
 
 
+def load_agents_paths(repo: Path) -> list[str] | None:
+    """`[agents_paths] allow` of the repository's `.agents/leak-check.toml`: the globs of files that may name the
+    directory. None when the table is absent (the ordinary rule); an empty list is strict mode with no allowance."""
+    candidates = [repo / ".agents" / EXEMPTIONS_NAME]
+    top = git_toplevel(repo)
+    if top is not None and top != repo:
+        candidates.append(top / ".agents" / EXEMPTIONS_NAME)
+    path = next((c for c in candidates if c.is_file()), None)
+    if path is None or _toml is None:
+        return None
+    try:
+        data = _toml.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None  # load_exemptions reports an unreadable file
+    table = data.get("agents_paths")
+    if table is None:
+        return None
+    allow = table.get("allow", []) if isinstance(table, dict) else None
+    unknown = [k for k in table if k != "allow"] if isinstance(table, dict) else []
+    if allow is None or not isinstance(allow, list) or not all(isinstance(x, str) for x in allow) or unknown:
+        raise UsageError("%s: `[agents_paths]` takes only `allow`, a list of globs" % path)
+    return allow
+
+
+def glob_regex(pattern: str) -> re.Pattern:
+    """`**` crosses directories, `*` and `?` do not, a trailing `/` means everything below it."""
+    if pattern.endswith("/"):
+        pattern += "**"
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
 def hit_class(hit: str) -> str | None:
     """The exemptable class of a tree hit (`"<rel>:<lineno>: <what>"`)."""
     match = HIT_RE.match(hit)
@@ -688,8 +756,11 @@ def scan_tree(repo: Path, files: list[str], plan_re, generic_re,
               personal: list[str] | None = None,
               allowlist: list[str] | None = None,
               infra: list[tuple[str, re.Pattern]] | None = None,
-              own: list[str] | None = None):
+              own: list[str] | None = None,
+              agents_allow: list[str] | None = None):
     """(hits, warnings, files read, files skipped).
+
+    `agents_allow` is `[agents_paths] allow` (None: the ordinary rule, see `load_agents_paths`).
 
     `own` is the repository's own names (`own_names`), blanked before the
     personal markers are matched: a repository naming itself publishes only
@@ -700,6 +771,7 @@ def scan_tree(repo: Path, files: list[str], plan_re, generic_re,
     allowlist = allowlist_forms(allowlist or [])
     infra = infra or []
     own_re = own_names_re(own or [])
+    allow_res = [glob_regex(g) for g in (agents_allow or [])]
     read = 0
     skipped = 0
     for rel in files:
@@ -732,7 +804,10 @@ def scan_tree(repo: Path, files: list[str], plan_re, generic_re,
                     hits.append("%s: internal infra [%s] %r"
                                 % (where, rule_id, match.group(0)))
             if agents_reference(path.name, line):
-                hits.append("%s: .agents path" % where)
+                if agents_allow is not None and PRIVATE_STORE_RE.search(line):
+                    hits.append("%s: %s" % (where, PRIVATE_STORE_HIT))
+                elif not any(rx.match(rel.replace("\\", "/")) for rx in allow_res):
+                    hits.append("%s: .agents path" % where)
             if PHASE_RE.search(line):
                 hits.append("%s: 'Phase N'" % where)
             match = DECISION_RE.search(line)
@@ -848,9 +923,14 @@ class LeakCheck(LoggingArgs, Cmd):
             return EXIT_CANNOT_CHECK
         print("mode:     %s" % mode)
 
+        try:
+            agents_allow = load_agents_paths(repo)
+        except UsageError as exc:
+            print("exempt:   UNUSABLE -- %s" % exc, file=sys.stderr)
+            return EXIT_USAGE
         hits, warnings, read, skipped = scan_tree(
             repo, files, alternation(distinctive), alternation(generic),
-            personal, allowlist, infra, own=own)
+            personal, allowlist, infra, own=own, agents_allow=agents_allow)
         commit_hits: list[tuple[str, str, str]] = []
         commits = checked = 0
         if is_git_worktree(repo):

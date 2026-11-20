@@ -782,3 +782,57 @@ class TheCommand(unittest.TestCase):
             self.assertEqual(out.returncode, leak_check.EXIT_CANNOT_CHECK,
                              out.stdout + out.stderr)
             self.assertIn("CANNOT CHECK", out.stdout)
+
+
+class AgentsPathsRule(Base):
+    """`[agents_paths]`: a path into the private store is never waived; allowed files may name the directory."""
+
+    def strict(self, allow: str, *files: tuple, exempt: str = "") -> Path:
+        crate = self.repo((".gitignore", NOTES + "\n"), *files)
+        write(crate / NOTES / leak_check.EXEMPTIONS_NAME,
+              exempt + "[agents_paths]\nallow = %s\n" % allow)
+        return crate
+
+    def test_a_path_into_the_private_store_is_a_hit_even_in_an_allowed_file_and_when_exempted(self) -> None:
+        crate = self.strict('["docs/**"]', ("docs/a.md", "see %s/plans/x.md\n" % NOTES),
+                            ("src/b.md", "see %s/kb/y.md\n" % NOTES),
+                            exempt='exempt = [".agents path"]\n')
+        code, out = self.scan(crate)
+        self.assertEqual(code, leak_check.EXIT_HITS, out)
+        self.assertIn("docs/a.md:1: private store path", out)
+        self.assertIn("src/b.md:1: private store path", out)
+
+    def test_a_plain_mention_is_allowed_only_in_an_allowed_file(self) -> None:
+        crate = self.strict('["docs/agents.md", "tool/"]', ("docs/agents.md", "the %s directory\n" % NOTES),
+                            ("tool/x.md", "the %s directory\n" % NOTES),
+                            ("docs/other.md", "the %s directory\n" % NOTES))
+        code, out = self.scan(crate)
+        self.assertEqual(code, leak_check.EXIT_HITS, out)
+        self.assertIn("docs/other.md:1: .agents path", out)
+        self.assertNotIn("docs/agents.md:1", out)
+        self.assertNotIn("tool/x.md:1", out)
+
+    def test_every_private_directory_is_named(self) -> None:
+        names = ("plans findings decisions kb tools references scratch reviews assets flows ideas research skills "
+                 "notes NOTES TODO AGENTS").split()
+        crate = self.strict("[]", *[("f%d.md" % i, "%s/%s\n" % (NOTES, n)) for i, n in enumerate(names)])
+        code, out = self.scan(crate)
+        self.assertEqual(out.count("private store path"), len(names), out)
+
+    def test_a_public_directory_that_happens_to_follow_is_not_a_private_path(self) -> None:
+        crate = self.strict("[]", ("a.md", "%s/skillset is fine\n" % NOTES),
+                            ("b.md", "%s/config.toml\n" % NOTES))
+        code, out = self.scan(crate)
+        self.assertNotIn("private store path", out)
+
+    def test_without_the_table_nothing_changes(self) -> None:
+        crate = self.repo((".gitignore", NOTES + "\n"), ("a.md", "see %s/plans/x.md\n" % NOTES))
+        code, out = self.scan(crate)
+        self.assertIn("a.md:1: .agents path", out)
+        self.assertNotIn("private store path", out)
+
+    def test_a_malformed_table_is_a_usage_error(self) -> None:
+        crate = self.repo((".gitignore", NOTES + "\n"), ("a.md", "x\n"))
+        write(crate / NOTES / leak_check.EXEMPTIONS_NAME, "[agents_paths]\nallowed = []\n")
+        code, out = run(str(crate), "--plans", str(self.empty_plans()), stderr=True)
+        self.assertEqual(code, leak_check.EXIT_USAGE, out)
