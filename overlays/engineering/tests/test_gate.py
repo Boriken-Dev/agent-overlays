@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from tools_env import no_machine_agent_files  # noqa: F401  (an autouse fixture)
+
 import _gate
 import _slots
 import agent_tools

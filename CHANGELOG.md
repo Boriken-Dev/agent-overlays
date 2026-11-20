@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- engineering: `lib/python/agent_tools.py`, the reader of the two agent-tools files (`<project>/.agents/agent-tools.toml`, the
+  machine's `agent-tools.local.toml`; unknown keys refused with file and key) and the one commit-message rule: no
+  `Co-Authored-By:` naming a model or an assistant, no `*-Session:` trailer, no session URL, no "Generated with" footer.
+- engineering: the commands `build-slot` (heavy builds only while a slot is free, sharing its limit file and gate directory with
+  the earlier scripts), `gate` (`run`, `wsl`, `merge`, `lock`: a project's steps under the shared gate lock, the Linux leg, the
+  fast-forward merge that pushes through `repo-guard`), `merge` (conflict resolvers that keep both sides, and a rebase or
+  cherry-pick loop that applies them by rule), `worktrees` (merged worktrees and their `target/` sizes, `--remove`) and
+  `configure-pages` (the repository settings a Pages workflow cannot set for itself). `kb/AGENT_TOOLS.md` has the schema and
+  each command.
+- engineering: `leak-check` reads `[agents_paths]` in its private `leak-check.toml`: a path into the private agent directory is
+  then a hit nothing waives, and a plain mention is allowed only in files the `allow` globs name.
+- release: the command `repo-guard` (`commit`, `push`, `deps`, `ci`): commits and pushes under the configured identity with the
+  commit-message rule, runs `dotagents leak-check` and the repository's `build.py scan`, refreshes and pushes a deps branch, and
+  runs CI once on a throwaway tag. The overlay now requires `engineering`.
+- The `Test` workflow also runs the engineering overlay's tests.
+
 - The eight overlays `engineering`, `net`, `node`, `private-sync`, `python`, `recovery`, `release` and `rust`, as they stood on the
   `repo` branch of `jose-pr/dotagents`, which keeps their earlier history.
 - `catalog.toml`, listing each overlay with its summary, icon, homepage and tags, for stores that read catalogs.

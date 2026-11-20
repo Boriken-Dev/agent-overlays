@@ -65,6 +65,33 @@ for the tag and prints a one-line verdict. The host is auto-detected from
 All hosts return the same shape:
 `{status: success|failed|unknown|error, message: "...", ...extras}`.
 
+## repo-guard
+
+`repo-guard` gets commits out of a repository under one identity, with one rule for commit messages. It reads the engineering
+overlay's configuration (`$ENGINEERING_OVERLAY_ROOT/kb/AGENT_TOOLS.md`): `[identity]` in the machine file, `[repo_guard]` in the
+project's.
+
+```text
+repo-guard commit [-C DIR] -m MSG [-a] [PATH...]
+repo-guard push   [-C DIR] [--no-deps]
+repo-guard deps   [-C DIR]
+repo-guard ci     [-C DIR] [--ref REF] [--timeout S] [--find-timeout S] [--every S] TOPIC
+```
+
+- `commit` refuses a message carrying agent attribution (a `Co-Authored-By:` naming a model or an assistant, a `*-Session:`
+  trailer, a session URL, a "Generated with" footer; a person's co-author line is fine) and commits as the identity.
+- `push` checks every commit above `REMOTE/MAIN` (author and committer are the identity, no forbidden trailer), that HEAD
+  fast-forwards `REMOTE/MAIN`, `dotagents leak-check`, the repository's `tools/build.py scan --all-refs` and each `pre_push`
+  command; then pushes `HEAD:MAIN` and fast-forwards `[repo_guard] checkout` when set. When `tools/build.cfg` has a `[deps]`
+  table and a lock file it names changed, `deps` follows. With nothing to push it still runs the checks.
+- `deps` runs `tools/build.py deps refresh`, scans the deps checkout, pushes the deps branch and then main, and appends a line to
+  `[repo_guard] log`.
+- `ci` tags `REF` (default main) as `ci-TOPIC-<UTC yyyymmddHHMMSS>`, pushes it, waits for the run through the release host,
+  prints each job's conclusion and the failed steps' last lines, and deletes the tag locally and on the remote even when the run
+  fails. Exit 0 only when the run succeeded.
+
+Exit codes: 0 ok, 1 refused or failed, 2 configuration or usage.
+
 ## Notes
 
 - Perf/CI claims in release notes come from CI, not local runs. The monitor

@@ -37,16 +37,16 @@ Any other consumer of the specification takes the same two forms: the `overlays`
 
 | Overlay | Does | Tags |
 | --- | --- | --- |
-| [`engineering`](overlays/engineering) | Process rules, plan and review workflows, repository templates and the commands `plans`, `leak-check`, `eol`, `summarize-run`, `compare-bench` | workflow, process |
+| [`engineering`](overlays/engineering) | Process rules, plan and review workflows, repository templates and the commands `plans`, `leak-check`, `eol`, `summarize-run`, `compare-bench`, `build-slot`, `gate`, `merge`, `worktrees`, `configure-pages` | workflow, process |
 | [`net`](overlays/net) | A drop-in curl and an operating-system trust store for agents that must fetch URLs | network |
 | [`node`](overlays/node) | Node and JavaScript conventions, a `package.json` template, CI workflows | language, javascript |
 | [`private-sync`](overlays/private-sync) | Each project's agent files in one private git repository, synced between machines | sync, workflow |
 | [`python`](overlays/python) | Python conventions and library standards, templates, `pyvenv` and `py` | language, python |
 | [`recovery`](overlays/recovery) | Rebuild a lost or corrupted agent configuration from transcripts and caches | recovery |
-| [`release`](overlays/release) | Cut releases and watch CI on GitHub or GitLab, with a commit plan | release, workflow |
+| [`release`](overlays/release) | Cut releases and watch CI on GitHub or GitLab, with a commit plan; the command `repo-guard` | release, workflow |
 | [`rust`](overlays/rust) | Rust conventions, crate standards, a `Cargo.toml` template, CI workflows | language, rust |
 
-`node`, `python` and `rust` require `engineering`; install it with them.
+`node`, `python`, `rust` and `release` require `engineering`; install it with them.
 
 ## Development
 

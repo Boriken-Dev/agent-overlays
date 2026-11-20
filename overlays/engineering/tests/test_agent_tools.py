@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import pytest
 
+from tools_env import no_machine_agent_files  # noqa: F401  (an autouse fixture)
+
 import agent_tools as at
 
 # What each of the two earlier checks refused, and what the user's global instructions forbid.

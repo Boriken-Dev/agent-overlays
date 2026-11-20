@@ -5,7 +5,7 @@ about = "Eight overlays in the Agent Overlay Specification format, each a folder
 
 [overlays.engineering]
 source = "overlays/engineering"
-description = "Always-on discipline for an agent that works in your repositories: commit shape, release-tag consent, benchmark evidence and token discipline. Adds the plan, execute, review and parallel-work workflows, language-neutral repository templates, and the commands plans, leak-check, eol, summarize-run and compare-bench."
+description = "Always-on discipline for an agent that works in your repositories: commit shape, release-tag consent, benchmark evidence and token discipline. Adds the plan, execute, review and parallel-work workflows, language-neutral repository templates, and the commands plans, leak-check, eol, summarize-run, compare-bench, build-slot, gate, merge, worktrees and configure-pages."
 
 [overlays.engineering.about]
 summary = "Process rules, plan and review workflows, and repository templates for agent-run engineering."
@@ -65,7 +65,7 @@ tags = ["recovery"]
 
 [overlays.release]
 source = "overlays/release"
-description = "A host-agnostic release helper: the agent emits the context for a commit plan, applies it one commit at a time, then tags and follows the CI run on GitHub (gh) or GitLab (gitlabq). Also the shared repository tools a repo copies into tools/: build.py (deps branch, scans, SDK lock, offline and release builds), public_api.py and apk.py."
+description = "A host-agnostic release helper: the agent emits the context for a commit plan, applies it one commit at a time, then tags and follows the CI run on GitHub (gh) or GitLab (gitlabq). The command repo-guard commits and pushes under one identity with no agent attribution, refreshes a deps branch and runs CI once. Also the shared repository tools a repo copies into tools/: build.py (deps branch, scans, SDK lock, offline and release builds), public_api.py and apk.py."
 
 [overlays.release.about]
 summary = "Cut releases and watch their CI, on GitHub or GitLab, with a commit plan the agent applies."

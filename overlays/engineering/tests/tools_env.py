@@ -1,5 +1,5 @@
-"""Puts the overlay's lib/python/ on sys.path for the tests, and keeps them off the real machine files.
-
+"""Puts the overlay's lib/python/ on sys.path for the tests and keeps them off the real machine files: a test module
+imports `no_machine_agent_files` from here. (Not a conftest.py: the release overlay's tests import their own.)
 The commands load their library by path and do not rely on this."""
 import sys
 from pathlib import Path

@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tools_env import no_machine_agent_files  # noqa: F401  (an autouse fixture)
+
 duho = pytest.importorskip("duho")
 
 MODULE = Path(__file__).resolve().parents[1] / "cmds" / "configure_pages.py"
