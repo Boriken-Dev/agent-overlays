@@ -297,7 +297,8 @@ def continue_pick(repo: Path, rounds: int, say: Callable[[str], None] = print) -
         if paths:
             _git(repo, "add", "--", *paths)
         done = _git(repo, kind, "--continue", env=env)
-        if done.returncode and kind == "cherry-pick" and not conflicted(repo):
+        nothing_staged = _git(repo, "diff", "--cached", "--quiet").returncode == 0
+        if done.returncode and kind == "cherry-pick" and not conflicted(repo) and nothing_staged:
             _git(repo, "cherry-pick", "--skip", env=env)  # the pick became empty
         elif done.returncode and not conflicted(repo) and operation(repo):
             say(f"STOP: git {kind} --continue failed: {(done.stderr or done.stdout).strip()[-300:]}")

@@ -141,6 +141,14 @@ def git(cwd, *args, check=True):
     return done.stdout.strip()
 
 
+@pytest.fixture(autouse=True)
+def git_identity(monkeypatch):
+    """`git rebase --continue` commits, so it needs an identity on a machine with none."""
+    for who in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{who}_NAME", "T")
+        monkeypatch.setenv(f"GIT_{who}_EMAIL", "t@example.test")
+
+
 def write_rules(repo, rules):
     (repo / ".agents").mkdir(exist_ok=True)
     body = "[merge]\nrules = [" + ", ".join(
