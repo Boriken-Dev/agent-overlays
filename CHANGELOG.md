@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - release: `build.py deps` (`sync`, `check [--quick] [--ref REF]`, `use`, `refresh`, `path`, `init`) keeps a `deps` branch of
   vendored crates equal to `Cargo.lock`, and `build.py scan` refuses archives, executables, keys, wasm and opaque binaries in
   a tree, a commit or all of history, with `[deps] allow` for the exceptions.
+- release: the Flutter section of `build.py`: pub packages (`[deps.pub]`) and CDN files (`[deps.cdn]`) on the deps branch with a
+  coverage check of `pubspec.lock`, `offline plan --json`, `flutter junctions` and `flutter precache-check`.
 - A `Test` workflow running the release overlay's tests on Linux, Windows and macOS at Python 3.11 and 3.14.
 
 ### Changed

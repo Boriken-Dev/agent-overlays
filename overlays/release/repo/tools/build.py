@@ -50,6 +50,7 @@ SELF_NAME = "build.py"
 UPSTREAM_DIR = "overlays/release/repo/tools"
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+IS_WINDOWS = os.name == "nt"
 
 
 class Problem(Exception):
@@ -248,6 +249,8 @@ class Ctx:
         self.root = root
         self.config = config
         self._cfg: Table | None = None
+        self.quick = False
+        self.pubspec_lock: Path | None = None
 
     @property
     def cfg(self) -> Table:
@@ -1518,6 +1521,8 @@ def ref_problems(ctx: Ctx, lock: Lock, commit: str) -> tuple[list[str], list[str
 
 
 def lock_path_of(ctx: Ctx, args: argparse.Namespace) -> Path:
+    ctx.pubspec_lock = getattr(args, "pubspec_lock", None)
+    ctx.quick = bool(getattr(args, "quick", False))
     return args.cargo_lock.resolve() if args.cargo_lock else ctx.root / ctx.cfg.deps.cargo_lock
 
 
@@ -1792,7 +1797,10 @@ def add_deps(sub: argparse._SubParsersAction) -> None:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--cargo-lock", type=Path, metavar="FILE", help="read this Cargo.lock instead of the repository's")
     common.add_argument("--deps", type=Path, metavar="DIR", help="the deps checkout (default: `deps path`)")
-    sync = commands.add_parser("sync", parents=[common], help="make the deps checkout match Cargo.lock: fetch, verify, remove")
+    common.add_argument("--pubspec-lock", type=Path, metavar="FILE", help="read this pubspec.lock instead of [deps.pub] lock")
+    pub_cache = argparse.ArgumentParser(add_help=False)
+    pub_cache.add_argument("--pub-cache", type=Path, metavar="DIR", help="the pub cache the pub packages are copied from (default: [deps.pub] cache, $PUB_CACHE, the platform's)")
+    sync = commands.add_parser("sync", parents=[common, pub_cache], help="make the deps checkout match Cargo.lock (and the pub packages and CDN files): fetch, verify, remove")
     sync.set_defaults(run=deps_sync)
     check = commands.add_parser("check", parents=[common], help="fail, naming what is missing, changed or stale")
     check.add_argument("--quick", action="store_true", help="read each package's metadata only, without re-hashing its files")
@@ -1804,7 +1812,7 @@ def add_deps(sub: argparse._SubParsersAction) -> None:
     use.add_argument("--json", action="store_true", help="print the result as JSON")
     use.add_argument("--full", action="store_true", help="re-hash every file first (default: package metadata only)")
     use.set_defaults(run=deps_use)
-    refresh = commands.add_parser("refresh", parents=[common], help="sync, commit on the deps branch, repin, then pin the commit on main")
+    refresh = commands.add_parser("refresh", parents=[common, pub_cache], help="sync, commit on the deps branch, repin, then pin the commit on main")
     refresh.set_defaults(run=deps_refresh)
     where = commands.add_parser("path", parents=[common], help="print the deps checkout, adding the worktree when it is missing")
     where.set_defaults(run=deps_path)
@@ -1822,6 +1830,595 @@ def add_scan(sub: argparse._SubParsersAction) -> None:
 
 
 SECTIONS.extend([add_deps, add_scan])
+
+# --- the SDK lock's rows (read here; `sdk` lints and installs them) -------------------------------------
+
+SCHEMA["sdk"] = Key("table", None, "The SDK lock.", {"lock": Key("str", "tools/sdk.lock", "The lock file, relative to the repository.")})
+
+
+class Item(NamedTuple):
+    line: int
+    group: str
+    name: str
+    version: str
+    platform: str
+    sha256: str
+    url: str
+
+
+def parse_lock_items(text: str, name: str = "sdk.lock") -> list[Item]:
+    """The rows of an SDK lock: six space-separated fields, `#` for a comment."""
+    items = []
+    for number, row in enumerate(text.split("\n"), 1):
+        row = row.strip()
+        if not row or row.startswith("#"):
+            continue
+        fields = row.split()
+        if len(fields) != 6:
+            raise Problem(f"{name}:{number}: expected 6 fields, found {len(fields)}")
+        items.append(Item(number, *fields))
+    return items
+
+
+def read_sdk_lock(ctx: Ctx) -> list[Item]:
+    path = ctx.root / ctx.cfg.sdk.lock
+    if not path.is_file():
+        raise Problem(f"{ctx.cfg.sdk.lock}: no such file")
+    return parse_lock_items(path.read_text(encoding="utf-8"), path.name)
+
+
+# --- pub packages and CDN files on the deps branch ----------------------------------------------------------
+
+# Directories at the top of a package that compilation never reads.
+PUB_DROP = ["test", "tests", "example", "examples", "benchmark", "benchmarks", "doc", "docs", ".github"]
+PUB_HOSTED_URL = "https://pub.dev"
+
+SCHEMA["deps"].keys["pub"] = Key(
+    "table",
+    None,
+    "Dart packages of the Flutter app on the deps branch (off when `lock` is empty).",
+    {
+        "lock": Key("str", "", "The app's pubspec.lock, relative to the repository."),
+        "drop": Key("strs", PUB_DROP, "Directories at a package's top that are left out."),
+        "require": Key("strs", [], "Packages that must be in the pub cache whatever pub resolves (for example a desktop build's tray and window packages)."),
+        "git": Key("str", "checkout", "`checkout`: pub/git/REPO-REV/ without .git is on the branch; `record`: git packages are only listed in manifest.json."),
+        "system": Key("strs", [], "System packages the require list links on Linux, recorded in manifest.json for whoever builds offline."),
+        "cache": Key("str", "", "The pub cache `deps sync` copies from; empty: --pub-cache, else $PUB_CACHE, else the default of the platform."),
+    },
+)
+SCHEMA["deps"].keys["cdn"] = Key(
+    "table",
+    None,
+    "Files a Flutter build downloads from a CDN (off when `index` is empty).",
+    {
+        "index": Key("str", "", "A JSON file `{\"files\": [{\"host\", \"path\", \"sha256\"}]}`, relative to the repository; files go to cdn/HOST/PATH."),
+        "hosts": Key("strs", [], "Only these hosts of the index; empty: all."),
+    },
+)
+SCHEMA["flutter"] = Key(
+    "table",
+    None,
+    "Flutter helpers.",
+    {
+        "app_dir": Key("str", "app", "The Flutter app, relative to the repository."),
+        "version_item": Key("str", "app flutter-version", "The lock row naming the framework version `precache-check` expects."),
+        "engine_item": Key("str", "app flutter-engine", "The lock row naming the engine revision."),
+        "dart_item": Key("str", "app dart", "The lock row naming the Dart version."),
+    },
+)
+SCHEMA["offline"] = Key(
+    "table",
+    None,
+    "`offline plan`.",
+    {"cache_dir": Key("str", "target/offline-pub-cache", "Where the pub cache an offline build uses is seeded, relative to the repository.")},
+)
+
+
+class Package(NamedTuple):
+    name: str
+    source: str
+    version: str
+    sha256: str
+    url: str
+    path: str
+    resolved_ref: str
+
+    @property
+    def repo(self) -> str:
+        """The name pub gives a git dependency's folders in its cache."""
+        return self.url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+
+    @property
+    def host(self) -> str:
+        return self.url.removeprefix("https://").removeprefix("http://").rstrip("/")
+
+    @property
+    def key(self) -> str:
+        """The package's directory name below pub/hosted/HOST or pub/git."""
+        return f"{self.name}-{self.version}" if self.source == "hosted" else f"{self.repo}-{self.resolved_ref}"
+
+
+def parse_pubspec_lock(text: str) -> list[Package]:
+    """The packages of a pubspec.lock, read by indentation: the file pub writes has one shape."""
+    packages: list[Package] = []
+    fields: dict[str, str] = {}
+    name = ""
+
+    def flush() -> None:
+        if name:
+            packages.append(
+                Package(
+                    name, fields.get("source", ""), fields.get("version", ""), fields.get("sha256", ""),
+                    fields.get("url", ""), fields.get("path", ""), fields.get("resolved-ref", ""),
+                )
+            )  # fmt: skip
+
+    in_packages = False
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" "):
+            flush()
+            name, fields = "", {}
+            in_packages = line.startswith("packages:")
+            continue
+        if not in_packages:
+            continue
+        if line.startswith("  ") and not line.startswith("   "):
+            flush()
+            name, fields = line.strip().rstrip(":"), {}
+            continue
+        key, _, value = line.strip().partition(":")
+        if value.strip():
+            fields[key] = value.strip().strip('"')
+    flush()
+    return packages
+
+
+def default_pub_cache(environ: dict[str, str] | os._Environ) -> Path:
+    if environ.get("PUB_CACHE"):
+        return Path(environ["PUB_CACHE"])
+    if os.name == "nt":
+        return Path(environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "Pub" / "Cache"
+    return Path.home() / ".pub-cache"
+
+
+def pubspec_lock_of(ctx: Ctx) -> Path | None:
+    chosen = getattr(ctx, "pubspec_lock", None)
+    if chosen:
+        return Path(chosen)
+    return ctx.root / ctx.cfg.deps.pub.lock if ctx.cfg.deps.pub.lock else None
+
+
+def cdn_files(ctx: Ctx) -> list[dict]:
+    """The entries of the CDN index, with each path checked: absolute, no `..`."""
+    cfg = ctx.cfg.deps.cdn
+    if not cfg.index:
+        return []
+    path = ctx.root / cfg.index
+    try:
+        entries = json.loads(path.read_text(encoding="utf-8"))["files"]
+    except (OSError, ValueError, KeyError) as error:
+        raise Problem(f"{cfg.index}: {error}") from error
+    chosen = []
+    for entry in entries:
+        if cfg.hosts and entry["host"] not in cfg.hosts:
+            continue
+        name = entry["path"]
+        if not name.startswith("/") or ".." in Path(name).parts or "\\" in name:
+            raise Problem(f"{cfg.index}: {name!r} is not an absolute path without ..")
+        chosen.append(entry)
+    return chosen
+
+
+def copy_package(source: Path, target: Path, drop: list[str], allow: Allow, prefix: str, skip_git: bool = False) -> tuple[collections.Counter, list[dict]]:
+    """Copies one pub package without the directories a build never reads, then deletes any file a
+    scanner would refuse. Returns (counts by dropped name or kind, the deleted files)."""
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(source, target, ignore=shutil.ignore_patterns(".git") if skip_git else None)
+    dropped: collections.Counter = collections.Counter()
+    deleted: list[dict] = []
+    for name in drop:
+        directory = target / name
+        if directory.is_dir():
+            dropped[name] += sum(1 for f in directory.rglob("*") if f.is_file())
+            shutil.rmtree(directory)
+    for file in sorted(f for f in target.rglob("*") if f.is_file()):
+        rel = f"{prefix}/{file.relative_to(target).as_posix()}"
+        kind = flagged_kind(file.read_bytes(), file.name)
+        if kind and not allow.permits(rel, kind):
+            dropped[kind] += 1
+            deleted.append({"path": rel, "kind": kind})
+            file.unlink()
+    return dropped, deleted
+
+
+def sync_pub(ctx: Ctx, deps_dir: Path, args: Any) -> tuple[list[str], dict]:
+    cfg = ctx.cfg.deps.pub
+    lock_path = pubspec_lock_of(ctx)
+    if lock_path is None:
+        return [], {}
+    packages = [p for p in parse_pubspec_lock(lock_path.read_text(encoding="utf-8")) if p.source in ("hosted", "git")]
+    chosen = getattr(args, "pub_cache", None)
+    cache = Path(chosen) if chosen else Path(cfg.cache) if cfg.cache else default_pub_cache(os.environ)
+    allow = Allow(ctx.cfg.deps.allow)
+    target = deps_dir / "pub"
+    counts: collections.Counter = collections.Counter()
+    deleted: list[dict] = []
+    names: list[str] = []
+    hosted = [p for p in packages if p.source == "hosted"]
+    git = [p for p in packages if p.source == "git"]
+    wanted_hosted = {(p.host, p.key) for p in hosted}
+    for p in hosted:
+        source = cache / "hosted" / p.host / p.key
+        if not source.is_dir():
+            raise Problem(f"pub cache {cache} has no hosted/{p.host}/{p.key}; run `flutter pub get` first")
+        done = copy_package(source, target / "hosted" / p.host / p.key, cfg.drop, allow, f"pub/hosted/{p.host}/{p.key}")
+        counts.update(done[0])
+        deleted += done[1]
+        names.append(p.key)
+        for rel in (f"hosted-hashes/{p.host}/{p.key}.sha256", f"hosted/{p.host}/.cache/{p.name}-versions.json"):
+            if (cache / rel).is_file():
+                (target / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(cache / rel, target / rel)
+    wanted_git: set[str] = set()
+    if cfg.git == "checkout":
+        for p in git:
+            source = cache / "git" / p.key
+            if not source.is_dir():
+                raise Problem(f"pub cache {cache} has no git/{p.key}; run `flutter pub get` first")
+            done = copy_package(source, target / "git" / p.key, cfg.drop, allow, f"pub/git/{p.key}", skip_git=True)
+            counts.update(done[0])
+            deleted += done[1]
+            wanted_git.add(p.key)
+    changes = []
+    # What the lock no longer names goes.
+    for base in ("hosted", "hosted-hashes"):
+        for host_dir in sorted((target / base).glob("*")) if (target / base).is_dir() else []:
+            for entry in sorted(host_dir.iterdir()):
+                stem = entry.name.removesuffix(".sha256")
+                if entry.name == ".cache":
+                    for cached in sorted(entry.iterdir()):
+                        if not any(cached.name == f"{p.name}-versions.json" and p.host == host_dir.name for p in hosted):
+                            cached.unlink()
+                            changes.append(f"removed pub/{base}/{host_dir.name}/.cache/{cached.name}")
+                    continue
+                if entry.name.startswith(".") or (host_dir.name, stem) in wanted_hosted:
+                    continue
+                shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+                changes.append(f"removed pub/{base}/{host_dir.name}/{entry.name}")
+    if (target / "git").is_dir():
+        for entry in sorted((target / "git").iterdir()):
+            if entry.name not in wanted_git:
+                shutil.rmtree(entry) if entry.is_dir() else entry.unlink()
+                changes.append(f"removed pub/git/{entry.name}")
+    present = {p.name for p in hosted}
+    absent = [name for name in cfg.require if name not in present]
+    if absent:
+        raise Problem("required packages missing from pubspec.lock: " + ", ".join(absent))
+    changes.append(f"pub: {len(hosted)} hosted packages, {len(wanted_git)} git checkouts, {sum(counts.values())} files dropped")
+    info = {
+        "pub": {
+            "packages": sorted(names),
+            "gitDependencies": [
+                {"package": p.name, "url": p.url, "path": p.path, "ref": p.resolved_ref, "mode": cfg.git} for p in git
+            ],
+            "dropped": {"directories": list(cfg.drop), "counts": dict(sorted(counts.items())), "deletedFlaggedFiles": deleted},
+            "require": list(cfg.require),
+            "systemPackages": list(cfg.system),
+        }
+    }
+    return changes, info
+
+
+def sync_cdn(ctx: Ctx, deps_dir: Path, args: Any) -> tuple[list[str], dict]:
+    entries = cdn_files(ctx)
+    if not ctx.cfg.deps.cdn.index:
+        return [], {}
+    changes, listed = [], []
+    template = "https://{host}{path}"
+
+    def copy(entry: dict) -> tuple[dict, bool]:
+        destination = deps_dir / "cdn" / entry["host"] / entry["path"].lstrip("/")
+        if destination.is_file() and sha256(destination.read_bytes()) == entry["sha256"]:
+            return {"host": entry["host"], "path": entry["path"], "sha256": entry["sha256"], "bytes": destination.stat().st_size}, False
+        data = fetch(template.format(host=entry["host"], path=entry["path"]))
+        if sha256(data) != entry["sha256"]:
+            raise Problem(f"CDN checksum mismatch for {entry['host']}{entry['path']}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+        return {"host": entry["host"], "path": entry["path"], "sha256": entry["sha256"], "bytes": len(data)}, True
+
+    with ThreadPoolExecutor(max_workers=max(1, ctx.cfg.deps.jobs)) as pool:
+        results = list(pool.map(copy, entries))
+    wanted = set()
+    for entry, (done, fetched) in zip(entries, results):
+        listed.append(done)
+        wanted.add((deps_dir / "cdn" / entry["host"] / entry["path"].lstrip("/")).resolve())
+        if fetched:
+            changes.append(f"added cdn/{entry['host']}{entry['path']}")
+    cdn = deps_dir / "cdn"
+    if cdn.is_dir():
+        for file in sorted(f for f in cdn.rglob("*") if f.is_file()):
+            if file.resolve() not in wanted:
+                file.unlink()
+                changes.append(f"removed cdn/{file.relative_to(cdn).as_posix()}")
+    return changes, {"cdn": {"files": sorted(listed, key=lambda f: (f["host"], f["path"]))}}
+
+
+def pub_check(ctx: Ctx, view: Any, lock: Lock) -> tuple[list[str], list[str]]:
+    """Every package pubspec.lock names is on the branch, or the offline build stops there.
+
+    A package from the Flutter SDK comes with it, and a path package is the checkout's. A hosted
+    package is `pub/hosted/HOST/NAME-VERSION`. A git package is pub's checkout of its repository at
+    the locked revision (`checkout`), or only listed in the manifest (`record`).
+    """
+    cfg = ctx.cfg.deps.pub
+    lock_path = pubspec_lock_of(ctx)
+    if lock_path is None:
+        return [], []
+    found: list[str] = []
+    packages = parse_pubspec_lock(lock_path.read_text(encoding="utf-8"))
+    if not packages:
+        found.append(f"{lock_path.name} names no package")
+    manifest = json.loads(view.read(MANIFEST) or b"{}") if cfg.git == "record" else {}
+    recorded = {(g.get("package"), g.get("ref")) for g in manifest.get("pub", {}).get("gitDependencies", [])}
+    for package in packages:
+        if package.source == "hosted":
+            where = f"pub/hosted/{package.host}/{package.key}"
+            have = view.exists(where)
+        elif package.source == "git" and cfg.git == "checkout":
+            where = f"pub/git/{package.key}/{package.path}/pubspec.yaml".replace("//", "/")
+            have = view.exists(where)
+        elif package.source == "git":
+            where = f"{MANIFEST} gitDependencies"
+            have = (package.name, package.resolved_ref) in recorded
+        else:
+            continue
+        if not have:
+            found.append(f"{lock_path.name} names {package.name} {package.version}, but there is no {where}; refresh the deps branch")
+    hosted_names = {p.name for p in packages if p.source == "hosted"}
+    found += [f"required package {name} is not in {lock_path.name}" for name in cfg.require if name not in hosted_names]
+    return found, []
+
+
+def cdn_check(ctx: Ctx, view: Any, lock: Lock) -> tuple[list[str], list[str]]:
+    if not ctx.cfg.deps.cdn.index:
+        return [], []
+    found = []
+    deep = not getattr(ctx, "quick", False)
+    for entry in cdn_files(ctx):
+        where = f"cdn/{entry['host']}{entry['path']}"
+        if not view.exists(where):
+            found.append(f"{where}: missing, {ctx.cfg.deps.cdn.index} names it")
+        elif deep and sha256(view.read(where) or b"") != entry["sha256"]:
+            found.append(f"{where}: SHA-256 is not the index's {entry['sha256']}")
+    return found, []
+
+
+DEPS_SYNCS.extend([sync_pub, sync_cdn])
+DEPS_CHECKS.extend([pub_check, cdn_check])
+
+
+# --- offline plan: what an offline build of the repository needs -----------------------------------------------
+
+
+def seed(source: Path, target: Path) -> None:
+    if source.is_dir() and not target.exists():
+        shutil.copytree(source, target)
+    elif source.is_file() and not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+
+
+def offline_plan(
+    ctx: Ctx, deps: Path | None, user_cache: Path, cargo_lock: Path | None, pubspec_lock: Path | None, cargo_out: Path | None = None
+) -> dict:
+    """{cache, reason, cargo_home}: the seeded pub cache and cargo home, or why a build must go online.
+
+    The user's pub cache is only read; the seeded one is below the repository's target directory.
+    """
+    plan: dict = {"cache": None, "reason": None, "cargo_home": None}
+    if deps is None or not deps.is_dir():
+        plan["reason"] = "no deps checkout (pass --deps, set BUILD_DEPS, or fetch the deps branch)"
+        return plan
+    cfg = ctx.cfg.deps.pub
+    target = ctx.root / ctx.cfg.offline.cache_dir
+    if pubspec_lock is not None and pubspec_lock.is_file():
+        wanted = [p for p in parse_pubspec_lock(pubspec_lock.read_text(encoding="utf-8")) if p.source in ("hosted", "git")]
+        hosted = [p for p in wanted if p.source == "hosted"]
+        git = [p for p in wanted if p.source == "git"]
+        if any(p.url != PUB_HOSTED_URL for p in hosted):
+            plan["reason"] = "a hosted package comes from a host other than pub.dev"
+            return plan
+        absent = [p.key for p in hosted if not (deps / "pub" / "hosted" / p.host / p.key).is_dir()]
+        if absent:
+            plan["reason"] = f"the deps branch lacks hosted packages: {', '.join(absent[:5])}"
+            return plan
+        differs = []
+        for p in hosted:
+            recorded = deps / "pub" / "hosted-hashes" / p.host / f"{p.key}.sha256"
+            if recorded.is_file() and recorded.read_text(encoding="utf-8").strip() != p.sha256:
+                differs.append(p.key)
+        if differs:
+            plan["reason"] = f"the deps branch's package hashes differ from {pubspec_lock.name}: {', '.join(sorted(differs)[:5])}"
+            return plan
+        if cfg.git == "record":
+            missing = [p for p in git if not (user_cache / "git" / p.key).is_dir()]
+            if missing:
+                listing = ", ".join(f"{p.name} {p.resolved_ref[:12]}" for p in missing)
+                plan["reason"] = f"git dependencies are not in the pub cache {user_cache}: {listing}"
+                return plan
+        else:
+            absent_git = [p.key for p in git if not (deps / "pub" / "git" / p.key).is_dir()]
+            if absent_git:
+                plan["reason"] = f"the deps branch lacks git checkouts: {', '.join(absent_git[:5])}"
+                return plan
+    if cargo_lock is not None and cargo_lock.is_file():
+        lock = read_lock(cargo_lock)
+        try:
+            info = use_crates(ctx, deps, lock, cargo_lock, cargo_out)
+        except Problem as problem:
+            plan["reason"] = f"the deps branch's crates/ does not cover {cargo_lock.name}: {problem}"
+            return plan
+        plan["cargo_home"] = info["cargo_home"]
+    if pubspec_lock is not None and pubspec_lock.is_file():
+        for p in hosted:
+            seed(deps / "pub" / "hosted" / p.host / p.key, target / "hosted" / p.host / p.key)
+            seed(deps / "pub" / "hosted" / p.host / ".cache" / f"{p.name}-versions.json", target / "hosted" / p.host / ".cache" / f"{p.name}-versions.json")
+            seed(deps / "pub" / "hosted-hashes" / p.host / f"{p.key}.sha256", target / "hosted-hashes" / p.host / f"{p.key}.sha256")
+        for p in git:
+            if cfg.git == "checkout":
+                destination = target / "git" / p.key
+                seed(deps / "pub" / "git" / p.key, destination)
+                # Pub takes a git package from its checkout once the checkout has .git/pub-packages,
+                # which pub fills in itself; git cannot carry a .git path, so the branch has none.
+                (destination / ".git").mkdir(exist_ok=True)
+                (destination / ".git" / "pub-packages").touch()
+            else:
+                seed(user_cache / "git" / p.key, target / "git" / p.key)
+                for bare in (user_cache / "git" / "cache").glob(f"{p.repo}-*"):
+                    seed(bare, target / "git" / "cache" / bare.name)
+        plan["cache"] = str(target)
+    return plan
+
+
+def offline_command(ctx: Ctx, args: argparse.Namespace) -> int:
+    cargo_lock = args.cargo_lock.resolve() if args.cargo_lock else ctx.root / ctx.cfg.deps.cargo_lock
+    ctx.pubspec_lock = args.pubspec_lock
+    try:
+        deps = find_deps(ctx, args.deps)
+    except Problem as problem:
+        deps = None
+        reason = str(problem)
+    chosen = args.pub_cache
+    user_cache = Path(chosen) if chosen else Path(ctx.cfg.deps.pub.cache) if ctx.cfg.deps.pub.cache else default_pub_cache(os.environ)
+    plan = offline_plan(ctx, deps, user_cache, cargo_lock, pubspec_lock_of(ctx), args.out)
+    if deps is None:
+        plan["reason"] = reason
+    if args.json:
+        print(json.dumps(plan, indent=2))
+    else:
+        print(f"pub cache:  {plan['cache'] or '-'}")
+        print(f"cargo home: {plan['cargo_home'] or '-'}")
+        if plan["reason"]:
+            print(f"offline is not possible: {plan['reason']}")
+    return 0 if not plan["reason"] else 1
+
+
+def add_offline(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser("offline", help="what an offline build of the repository needs")
+    commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
+    plan = commands.add_parser("plan", help="seed the pub cache and write the cargo home from the deps checkout, or say why not")
+    plan.add_argument("--json", action="store_true", help="print {cache, reason, cargo_home} as JSON")
+    plan.add_argument("--deps", type=Path, metavar="DIR", help="the deps checkout (default: `deps path`)")
+    plan.add_argument("--cargo-lock", type=Path, metavar="FILE", help="read this Cargo.lock instead of the repository's")
+    plan.add_argument("--pubspec-lock", type=Path, metavar="FILE", help="read this pubspec.lock instead of [deps.pub] lock")
+    plan.add_argument("--pub-cache", type=Path, metavar="DIR", help="the user's pub cache, only read (git packages recorded, not vendored, come from it)")
+    plan.add_argument("--out", type=Path, metavar="DIR", help="where the cargo home is written (default: a temp directory named for the lock)")
+    plan.set_defaults(run=offline_command)
+
+
+# --- flutter: plugin junctions and the pinned checkout ---------------------------------------------------------
+
+
+def make_junction(link: Path, target: Path) -> None:
+    """A directory junction, which needs no privilege (a symbolic link needs Developer Mode)."""
+    done = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True, text=True)
+    if done.returncode != 0:
+        raise Problem(f"mklink /J {link}: {done.stdout.strip() or done.stderr.strip()}")
+
+
+def flutter_junctions(ctx: Ctx, args: argparse.Namespace) -> int:
+    """Recreates the Windows plugin links `flutter build windows` needs, without Developer Mode.
+
+    Flutter makes `windows/flutter/ephemeral/.plugin_symlinks/<plugin>` as symbolic links and
+    skips any link that already exists, so a junction made here is accepted. Idempotent.
+    """
+    if not IS_WINDOWS:
+        print("not Windows: no plugin links to make")
+        return 0
+    app = (args.app or ctx.root / ctx.cfg.flutter.app_dir).resolve()
+    manifest = app / ".flutter-plugins-dependencies"
+    if not manifest.is_file():
+        raise Problem(f"no .flutter-plugins-dependencies in {app}: run `flutter pub get` first")
+    links = app / "windows" / "flutter" / "ephemeral" / ".plugin_symlinks"
+    links.mkdir(parents=True, exist_ok=True)
+    plugins = json.loads(manifest.read_text(encoding="utf-8")).get("plugins", {}).get("windows") or []
+    if not plugins:
+        print("no Windows plugins declared")
+        return 0
+    created = 0
+    for plugin in plugins:
+        link = links / plugin["name"]
+        if link.exists() or link.is_symlink():
+            continue
+        # The manifest stores a trailing separator and doubled separators.
+        target = Path(os.path.normpath(plugin["path"]))
+        if not target.exists():
+            print(f"warning: {plugin['name']}: target missing, skipped: {target}", file=sys.stderr)
+            continue
+        make_junction(link, target)
+        print(f"linked {plugin['name']} -> {target}")
+        created += 1
+    print(f"{created} junction(s) created; {len(plugins)} plugin(s) declared")
+    return 0
+
+
+def json_field(text: str, key: str) -> str:
+    found = re.search(rf'"{re.escape(key)}"\s*:\s*"([^"]*)"', text)
+    return found[1] if found else ""
+
+
+def flutter_precache_check(ctx: Ctx, args: argparse.Namespace) -> int:
+    """What Flutter reports about itself, against what the lock expects of that commit."""
+    cfg = ctx.cfg.flutter
+    root = args.flutter_root or (Path(os.environ["FLUTTER_ROOT"]) if os.environ.get("FLUTTER_ROOT") else None)
+    if root is None:
+        raise Usage("name the Flutter checkout with --flutter-root or $FLUTTER_ROOT")
+    items = read_sdk_lock(ctx)
+
+    def want(row: str) -> str:
+        group, _, name = row.partition(" ")
+        found = [i.version for i in items if i.group == group and i.name == name]
+        if len(found) != 1:
+            raise Problem(f"{ctx.cfg.sdk.lock}: expected one `{row}` row, found {len(found)}")
+        return found[0]
+
+    version_file = root / "bin" / "cache" / "flutter.version.json"
+    stamp = root / "bin" / "cache" / "engine.stamp"
+    if not version_file.is_file() or not stamp.is_file():
+        raise Problem(f"{root}: no bin/cache/flutter.version.json or engine.stamp; run `flutter precache` there")
+    text = version_file.read_text(encoding="utf-8")
+    found = []
+    got = json_field(text, "frameworkVersion")
+    if got != want(cfg.version_item):
+        found.append(f"flutter reports version {got}, the lock says {want(cfg.version_item)}")
+    got = stamp.read_text(encoding="utf-8").strip()
+    if got != want(cfg.engine_item):
+        found.append(f"flutter's engine is {got}, the lock says {want(cfg.engine_item)}")
+    got = json_field(text, "dartSdkVersion")
+    if want(cfg.dart_item) not in got:
+        found.append(f"flutter's Dart is {got}, the lock says {want(cfg.dart_item)}")
+    if found:
+        raise Problem("\n".join(found))
+    print(f"ok: Flutter {want(cfg.version_item)}, engine {want(cfg.engine_item)[:12]}, Dart {want(cfg.dart_item)}")
+    return 0
+
+
+def add_flutter(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser("flutter", help="plugin junctions on Windows and the pinned Flutter checkout")
+    commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
+    junctions = commands.add_parser("junctions", help="recreate the Windows plugin links flutter build windows needs (no privilege)")
+    junctions.add_argument("--app", type=Path, metavar="DIR", help="the Flutter app (default: [flutter] app_dir)")
+    junctions.set_defaults(run=flutter_junctions)
+    check = commands.add_parser("precache-check", help="verify the checkout's version, engine and Dart against the SDK lock")
+    check.add_argument("--flutter-root", type=Path, metavar="DIR", help="the Flutter checkout (default: $FLUTTER_ROOT)")
+    check.set_defaults(run=flutter_precache_check)
+
+
+SECTIONS.extend([add_offline, add_flutter])
 
 # @@END-OF-SECTIONS@@
 

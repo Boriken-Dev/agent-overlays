@@ -53,3 +53,23 @@ commit and the SHA-256 of `Cargo.lock`, and the checks read it.
   file that is not text or a known image or font is flagged, including `wasm`, `pdf`, `sqlite` and unrecognised binaries.
   `[deps] allow` lets one kind through one path pattern (`"cdn/www.gstatic.com/flutter-canvaskit/*:wasm"`); a repository with
   text files that are not UTF-8 allows `"*:unrecognised binary"` for the whole-history scan.
+
+## Flutter (`[deps.pub]`, `[deps.cdn]`, `offline`, `flutter`)
+
+A section the configuration leaves out is off.
+
+- `[deps.pub] lock = "app/pubspec.lock"` puts the Dart packages on the deps branch: `deps sync --pub-cache DIR` copies the
+  hosted packages and their hashes (`pub/hosted/HOST/NAME-VERSION`, `pub/hosted-hashes/`) and, with `git = "checkout"`, each git
+  package's checkout without `.git` (`pub/git/REPO-REVISION/`); with `git = "record"` git packages are only listed in
+  `manifest.json`. Only packages the lock names are copied. The `drop` directories (default `test`, `tests`, `example`,
+  `examples`, `benchmark`, `benchmarks`, `doc`, `docs`, `.github`) and every file the scanner would refuse are left out and
+  listed in the manifest. `require` names packages that must be present whatever pub resolves. `deps check` fails on any
+  hosted or git package the lock names that the branch lacks.
+- `[deps.cdn] index = "app/tool/cdn_files.json"` (`{"files": [{"host", "path", "sha256"}]}`) fills `cdn/HOST/PATH`, each file
+  verified against its hash; `hosts` limits the index to some hosts.
+- `offline plan [--json]` checks the deps checkout against `pubspec.lock` and `Cargo.lock`, seeds a pub cache below
+  `target/offline-pub-cache` (git packages the branch only records come from the user's pub cache, which is only read) and
+  writes the cargo home, or prints why a build must go online.
+- `flutter junctions` recreates the Windows plugin links `flutter build windows` needs, as directory junctions that need no
+  Developer Mode; `flutter precache-check` compares a Flutter checkout's version, engine stamp and Dart with the SDK lock rows
+  named in `[flutter]`.
