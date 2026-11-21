@@ -95,7 +95,20 @@ class Records(LoggingArgs, Cli):
                     cand = Path.cwd() / ".agents" / target
                     if cand.exists():
                         target = cand
-            return FolderStore(target)
+            status_folders = None
+            default_status = "active"
+            if target.name == "findings" or (target / "active").is_dir() or (target / "processed").is_dir():
+                status_folders = {"active": "active", "processed": "processed"}
+            elif target.name == "plans" or (target / "ready").is_dir() or (target / "completed").is_dir():
+                status_folders = {
+                    "draft": "draft",
+                    "ready": "ready",
+                    "executing": "executing",
+                    "on-hold": "on-hold",
+                    "done": "completed",
+                }
+                default_status = "draft"
+            return FolderStore(target, status_folders=status_folders, default_status=default_status)
 
     class Query(_Base):
         """SQL-like query over all records in a folder (`SELECT ... FROM records ...`)."""

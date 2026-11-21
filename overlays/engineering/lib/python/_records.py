@@ -837,6 +837,8 @@ class FolderStore:
         rec.meta["updated"] = today_iso()
         rec.save()
         dest_dir = self.status_dir(new_status)
+        if not self.status_folders and new_status:
+            dest_dir = self.root / new_status
         if rec.is_complex:
             src_dir = rec.path.parent
             dest_subdir = dest_dir / src_dir.name

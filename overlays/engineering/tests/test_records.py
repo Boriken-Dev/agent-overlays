@@ -136,3 +136,9 @@ def test_records_cli_subcommands(tmp_path, capsys):
     assert cmd_q() == 0
     data = json.loads(capsys.readouterr().out)
     assert len(data) == 1 and data[0]["name"] == "item-one"
+
+    cmd_mv = Records.Mv(folder=folder, name="item-one", status="processed")
+    assert cmd_mv() == 0
+    capsys.readouterr()
+    assert (folder / "processed" / "item-one.md").is_file()
+    assert not (folder / "item-one.md").exists()
