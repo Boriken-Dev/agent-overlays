@@ -22,12 +22,10 @@ The writing rule behind the first two is
 ## Running it
 
 ```bash
-dotagents leak-check <repo>
-dotagents leak-check <repo> --commits-only
-dotagents leak-check <repo> --full          # also audit pushed commit messages
+leak-check <repo>
+leak-check <repo> --commits-only
+leak-check <repo> --full          # also audit pushed commit messages
 ```
-
-Over MCP it is the tool `dotagents.leak-check`, with the same arguments.
 
 It scans the working tree — tracked and untracked, ignore rules honoured,
 since a file just written is where a new leak is likeliest — and commit
@@ -90,7 +88,7 @@ counted, one `EXEMPT <file>: N <class>` line per file.
 The built-in patterns know the shapes: note paths, phase phrasing, decision
 ids, plan file names, attribution trailers. They cannot know your names.
 Those go in `audit_patterns.local.json` in the agent store
-(`$DOTAGENTS_AUDIT_PATTERNS` or `--patterns` point elsewhere):
+(`$AGENTS_AUDIT_PATTERNS` or `--patterns` point elsewhere):
 
 ```json
 {

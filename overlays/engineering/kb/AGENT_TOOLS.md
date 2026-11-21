@@ -5,7 +5,7 @@ the checks a branch passes before it is merged, resolving merge conflicts withou
 and configuring GitHub Pages. `repo-guard`, which gets commits out, is the release overlay's
 (`$RELEASE_OVERLAY_ROOT/kb/RELEASE.md`) and reads the same configuration.
 
-Every command is a `dotagents NAME`, runs under dotagents' own Python and uses the standard library plus `duho`.
+Every command is exposed via `[scripts]` and `skills/<name>/<script>.py`, runs under `$AGENTS_PYTHON` (or `python3`) and uses the standard library plus `duho`.
 
 ## Configuration
 
@@ -88,7 +88,7 @@ exec = ["wsl.exe", "-d", "MyDistro", "-u", "builder", "--"]   # instead of the d
 
 ## Commands
 
-### `dotagents build-slot [--limit N] [--max-wait S] [--every S] [--settle S] -- CMD...`
+### `build-slot [--limit N] [--max-wait S] [--every S] [--settle S] -- CMD...`
 
 Runs a heavy build (a running cargo, rustc, Flutter test, Dart build or test) only while fewer than the limit run on
 this machine. With no command it only waits for a slot.
@@ -103,7 +103,7 @@ this machine. With no command it only waits for a slot.
 - The state files are those of earlier `build_slot.py` scripts, so old and new callers share one limit and one gate and
   may run at the same time.
 
-### `dotagents gate run WORKTREE [--step NAME]... [--out DIR] [--fail-fast]`
+### `gate run WORKTREE [--step NAME]... [--out DIR] [--fail-fast]`
 
 Runs `[gate] steps`. Refuses a tree in the middle of a rebase, merge or cherry-pick or with unmerged paths. Takes the
 gate lock (`[gate] lock`, a `mkdir` lock with a `holder` file inside; it waits, naming the holder), runs each step through
@@ -112,25 +112,25 @@ gate lock (`[gate] lock`, a `mkdir` lock with a `holder` file inside; it waits, 
 matches one of its globs (every step runs when that ref does not exist). Each step's log and verdict are in `--out`
 (default `gate_NAME` under the temporary directory). Exit 1 when a step failed.
 
-### `dotagents gate wsl WORKTREE [--out DIR]`
+### `gate wsl WORKTREE [--out DIR]`
 
 Runs `[gate] wsl_steps` in a Linux distribution on a `git archive` of HEAD, under the same lock: the archive is unpacked
 into `[wsl] home`/`gate_NAME`, each step runs there with `CARGO_TARGET_DIR` set beside it and `CARGO_BUILD_JOBS` from
 `[wsl] jobs`, and `PASS wsl:name` or `FAIL wsl:name` is printed. The target is kept between runs and cleared (then
 `fstrim` as root) once it passes `[wsl] target_max_gb`; the clone is removed.
 
-### `dotagents gate merge BRANCH [-C DIR] [--no-push] [--out DIR]`
+### `gate merge BRANCH [-C DIR] [--no-push] [--out DIR]`
 
 In a repository on its main branch: refuses a branch that is not a fast-forward of main or whose commits carry agent
 attribution, fast-forwards main, runs `run` and `wsl` under one lock and, only if all passed, pushes through
 `repo-guard push`. After a failed check main stays advanced locally and the output names the `git reset --hard` that
 undoes it.
 
-### `dotagents gate lock LABEL -- CMD...`
+### `gate lock LABEL -- CMD...`
 
 Runs a command while holding the gate lock, waiting for it like the other gates.
 
-### `dotagents merge ...`
+### `merge ...`
 
 | Command | Does |
 | --- | --- |
@@ -148,12 +148,12 @@ regenerate it: a lock file). `continue` stops, naming the path and staging nothi
 resolved file would still hold a marker. Exit 0 finished, 1 a path needs a person, 2 the round limit. Every resolver
 refuses to leave a conflict marker.
 
-### `dotagents worktrees [-C DIR] [--root GLOB] [--remove]`
+### `worktrees [-C DIR] [--root GLOB] [--remove]`
 
 Lists each linked worktree as `merged` (all its patches are in `REMOTE/MAIN`, by `git cherry`) or `open`, with the size
 of its `target/`. `--remove` removes the merged ones with `git worktree remove` and skips one with uncommitted changes.
 
-### `dotagents configure-pages OWNER/REPO [--tag-pattern v*] [--branch B] [--dry-run]`
+### `configure-pages OWNER/REPO [--tag-pattern v*] [--branch B] [--dry-run]`
 
 Applies the three repository settings a Pages workflow cannot set for itself (default workflow permissions when a Pages
 job relies on them, Pages building from Actions, and the `github-pages` environment allowing the release tag pattern and
@@ -173,7 +173,7 @@ forbidden` adds patterns.
 
 ## `leak-check`: the private store
 
-A `[agents_paths]` table in the repository's private `leak-check.toml` makes `dotagents leak-check` strict about the
+A `[agents_paths]` table in the repository's private `leak-check.toml` makes `leak-check` strict about the
 private agent directory: a path into it (its plans, findings, decisions, kb, tools, references, scratch and the like)
 is a `private store path` hit in every file and nothing waives it; a plain mention of the directory is still a hit,
 except in files matching `allow` globs, for a tool that keeps its own files in a directory of that name.

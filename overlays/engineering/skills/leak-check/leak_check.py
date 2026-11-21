@@ -1,10 +1,10 @@
-"""`dotagents leak-check` -- scan a working tree for private material that must not ship.
+"""`leak-check` -- scan a working tree for private material that must not ship.
 
 Usage:
-    dotagents leak-check [repo] [--plans DIR] [--patterns FILE] [--commits-only]
+    leak-check [repo] [--plans DIR] [--patterns FILE] [--commits-only]
 
 A command module shipped by this overlay: installing the overlay is what makes
-the command exist. A same-named command in the store's own `dotagents/cmds/`
+the command exist. A same-named command in the store's own `skills/`
 overrides it.
 
 What it looks for
@@ -73,7 +73,7 @@ below it): a tool that keeps its own files in a directory of that name may descr
 
 The pattern file
 ----------------
-``$DOTAGENTS_AUDIT_PATTERNS``, else ``audit_patterns.local.json`` in the agent
+``$AGENTS_AUDIT_PATTERNS``, else ``audit_patterns.local.json`` in the agent
 store (``$AGENTS_HOME``, else ``~/.agents``); ``--patterns`` overrides both.
 Every key is optional::
 
@@ -223,7 +223,7 @@ TRAILER_RE = re.compile(
 # a shipped file naming it is citing the plan. A single lowercase word is not.
 DISTINCTIVE_RE = re.compile(r"[_\-0-9]")
 
-PATTERNS_ENV = "DOTAGENTS_AUDIT_PATTERNS"
+PATTERNS_ENV = "AGENTS_AUDIT_PATTERNS"
 DEFAULT_PATTERNS = (Path(os.environ.get("AGENTS_HOME") or Path.home() / ".agents")
                     / "audit_patterns.local.json")
 
@@ -843,7 +843,7 @@ class LeakCheck(LoggingArgs, Cmd):
     ("--plans",)
 
     patterns: Annotated[str, Meta(env=PATTERNS_ENV)] = ""
-    "Machine-local pattern file (default: $DOTAGENTS_AUDIT_PATTERNS, else the agent store's)."
+    "Machine-local pattern file (default: $AGENTS_AUDIT_PATTERNS, else the agent store's)."
     ("--patterns",)
 
     commits_only: bool = False
@@ -1116,3 +1116,9 @@ class LeakCheck(LoggingArgs, Cmd):
                 print("!! NOT ONE FILE WAS READ. There is nothing here this "
                       "tool can check.")
         print("!" * 72)
+
+
+if __name__ == "__main__":
+    from duho import main as _duho_main
+
+    raise SystemExit(_duho_main(LeakCheck))

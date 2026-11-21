@@ -1,4 +1,4 @@
-"""`dotagents merge`: every resolver keeps what both sides wrote and never leaves a marker; `continue` resolves a
+"""`merge`: every resolver keeps what both sides wrote and never leaves a marker; `continue` resolves a
 rebase or cherry-pick by rule."""
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import _merge
 
 duho = pytest.importorskip("duho")
 
-MODULE = Path(__file__).resolve().parents[1] / "cmds" / "merge.py"
+MODULE = Path(__file__).resolve().parents[1] / "skills" / "merge" / "merge.py"
 _spec = importlib.util.spec_from_file_location("merge_cmd", MODULE)
 merge_cmd = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = merge_cmd

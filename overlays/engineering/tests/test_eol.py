@@ -1,4 +1,4 @@
-"""`dotagents eol`: endings are counted in bytes, the repository's own attributes
+"""`eol`: endings are counted in bytes, the repository's own attributes
 decide what a file should be, and a fix can never empty a file."""
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import pytest
 
 duho = pytest.importorskip("duho")
 
-MODULE = Path(__file__).resolve().parents[1] / "cmds" / "eol.py"
+MODULE = Path(__file__).resolve().parents[1] / "skills" / "eol" / "eol.py"
 _spec = importlib.util.spec_from_file_location("eol_cmd", MODULE)
 eol = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = eol  # duho resolves field annotations through sys.modules

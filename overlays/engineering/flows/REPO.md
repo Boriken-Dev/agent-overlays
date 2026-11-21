@@ -12,7 +12,7 @@ restates the other.
 - `benchmarks/`: a dedicated perf suite, run on demand, never as per-push CI. Its
   runner (`--save`) writes one JSON result per (version, interpreter) to
   `benchmarks/results/<name>.json`; each metric reports min/median/max ms per call
-  over N samples, compared on the median (`dotagents compare-bench`). Results are
+  over N samples, compared on the median (`compare-bench`). Results are
   **tracked and committed**, which is what keeps a before/after recoverable (never
   under the gitignored `.agents/`). `benchmarks/README.md` documents the schema and
   the reproduce command; keep a baseline entry for the pre-optimization state.
@@ -100,11 +100,11 @@ release, and the docs site must be redeployable between releases.
 - `.gitignore`: from `references/`. It opens with the root-anchored category rule
   `/.*` + `!/.gitignore` + `!/.gitattributes` (re-include `!/.github/` only when CI
   exists); a category beats a list, as Cargo's `exclude = [".*"]` does. It also
-  keeps `.agents` (slashless: `dotagents link-project` can make it a symlink, which
+  keeps `.agents` (slashless: a linked `.agents` can be a symlink, which
   a directory-only `.agents/` won't match), `CLAUDE*` and `.claude` for nested
   copies the root rule can't reach, plus the language's build output.
 - `.gitattributes`: from `references/` (`* text=auto eol=lf`; exceptions and
-  `dotagents eol` in `$ENGINEERING_OVERLAY_ROOT/kb/EOL.md`), created WITH the repo,
+  `eol` in `$ENGINEERING_OVERLAY_ROOT/kb/EOL.md`), created WITH the repo,
   and added to an existing repo that lacks it before you edit it. Verify git sees
   it: `git status --porcelain --ignored -- .gitattributes` prints `??`, `A` or `M`,
   never `!!` (a `.*` ignore without `!/.gitattributes` swallows it; `git
@@ -144,7 +144,7 @@ release, and the docs site must be redeployable between releases.
   `AGENTS.md` IS listed, `AGENTS.local.md` is NOT.
 - `CHANGELOG.md`: Keep a Changelog format (`references/CHANGELOG.md`): `[Unreleased]`
   always on top, one `## [x.y.z] - <date>` heading per release. Release is the last
-  gate for the leak scan, not the only one (`dotagents leak-check <repo>`;
+  gate for the leak scan, not the only one (`leak-check <repo>`;
   `$ENGINEERING_OVERLAY_ROOT/kb/LEAKS.md`). An attribution trailer that already
   landed is rewritten out (`git filter-branch --msg-filter "sed
   '/^Claude-Session:/d'"`); pre-rewrite SHAs stay reachable on the host until it GCs.

@@ -1,6 +1,6 @@
-"""`dotagents worktrees` -- find the worktrees whose work is already upstream, and remove them.
+"""`worktrees` -- find the worktrees whose work is already upstream, and remove them.
 
-    dotagents worktrees [-C DIR] [--root GLOB] [--remove]
+    worktrees [-C DIR] [--root GLOB] [--remove]
 
 Lists each linked worktree of the repository as `merged` (every commit's patch is in REMOTE/MAIN, as a
 cherry-picked stack leaves it, checked with `git cherry`), `open` (with the count of commits not upstream) or
@@ -19,9 +19,23 @@ from pathlib import Path
 
 from duho import Cmd, LoggingArgs
 
-_LIB = str(Path(__file__).resolve().parents[1] / "lib" / "python")
-if _LIB not in sys.path:
-    sys.path.insert(0, _LIB)
+def _resolve_lib_dir() -> Path:
+    import os
+    for env_key in ("ENGINEERING_OVERLAY_ROOT", "AOS_OVERLAY_ROOT"):
+        val = os.environ.get(env_key)
+        if val and (Path(val) / "lib" / "python").is_dir():
+            return Path(val) / "lib" / "python"
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "lib" / "python"
+        if candidate.is_dir():
+            return candidate
+    return here.parents[2] / "lib" / "python"
+
+
+_LIB = _resolve_lib_dir()
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
 
 import _gate  # noqa: E402
 import agent_tools  # noqa: E402
@@ -118,3 +132,9 @@ class Worktrees(LoggingArgs, Cmd):
                 done = _git(repo, "worktree", "remove", str(path))
                 print(f"  removed {path}" if not done.returncode else f"  could not remove {path}: {done.stderr.strip()}")
         return 0
+
+
+if __name__ == "__main__":
+    from duho import main as _duho_main
+
+    raise SystemExit(_duho_main(Worktrees))

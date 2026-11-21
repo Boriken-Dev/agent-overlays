@@ -1,7 +1,7 @@
-"""`dotagents compare-bench` -- diff two benchmark result files and print a verdict.
+"""`compare-bench` -- diff two benchmark result files and print a verdict.
 
-    dotagents compare-bench benchmarks/results/old.json new.json
-    dotagents compare-bench --threshold 10 old.json new.json
+    compare-bench benchmarks/results/old.json new.json
+    compare-bench --threshold 10 old.json new.json
 
 Reads the structured benchmark JSON the repository standard describes
 (`$ENGINEERING_OVERLAY_ROOT/flows/REPO.md`: min, median and max ms per metric,
@@ -95,3 +95,9 @@ class CompareBench(LoggingArgs, Cmd):
         flat = {name: (m["median_ms"] if isinstance(m, dict) else float(m))
                 for name, m in metrics.items()}
         return {"name": data.get("name", Path(path).stem), "metrics": flat, "raw": data}
+
+
+if __name__ == "__main__":
+    from duho import main as _duho_main
+
+    raise SystemExit(_duho_main(CompareBench))

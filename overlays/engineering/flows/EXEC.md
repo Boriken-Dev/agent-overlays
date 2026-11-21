@@ -13,12 +13,12 @@ Do not re-plan, second-guess recorded decisions, or silently downgrade required 
    override generic habits.
 3. Read the project's `.agents/AGENTS.md` at the root and each intervening subtree
    (deeper wins); follow matching routing lines only.
-4. Read the plan in full once (`dotagents plans show <name>`); after that,
-   `dotagents plans next <name>` gives what the current step needs. For a sub-plan,
+4. Read the plan in full once (`plans show <name>`); after that,
+   `plans next <name>` gives what the current step needs. For a sub-plan,
    read its parent first and the assigned sub-plan only; update both when a phase
    changes. **Reconcile before continuing**: fix Progress that disagrees with the
-   working tree or git history, and move any `done` plan at the `plans/` top level
-   into `completed/`.
+   working tree or git history, and move any `done` plan not yet under
+   `plans/completed/` via `plans status <name> done -m "<evidence>"`.
 5. **Check for another executor in this tree** before editing, and check your base
    if you are in a worktree: `$ENGINEERING_OVERLAY_ROOT/flows/PARALLEL.md`, which
    also covers fanning out, integrating and removing worktrees.
@@ -30,14 +30,14 @@ writing code and `[x]` right after, with a short outcome, one call each as the s
 happens, never batched at the end:
 
 ```
-dotagents plans start <name> <phase>
-dotagents plans check <name> <phase> -m "<outcome>"
-dotagents plans block <name> <phase> -m "<reason and the failed command>"
-dotagents plans note  <name> -m "<fact learned, with its evidence>"
+plans start <name> <phase>
+plans check <name> <phase> -m "<outcome>"
+plans block <name> <phase> -m "<reason and the failed command>"
+plans note  <name> -m "<fact learned, with its evidence>"
 ```
 
-Where the harness has `dotagents` as an MCP server (`DOTAGENTS_MCP=stdio`), use the
-tools `dotagents.plans.start`, `.check`, `.block` and `.note` instead of a process
+Where a `duho` skill script is served over MCP (`PLANS_MCP=stdio`), you may call
+`plans.start`, `.check`, `.block` and `.note` instead of spawning a process
 each. The box update is part of the step: code whose box is stale reads as drift.
 Blockers keep their reason; continue independent items and never ask the user.
 Record key decisions and deviations in Progress.
@@ -47,7 +47,7 @@ Record key decisions and deviations in Progress.
 Before a phase counts as done, update in the same commit set as applicable: the
 changelog, README, `.agents/AGENTS.md` notes, tests and examples; a public API
 change also updates the shipped `AGENTS.md` header. Any run that commits or edits
-public-facing text runs `dotagents leak-check <repo>`
+public-facing text runs `leak-check <repo>`
 (`$ENGINEERING_OVERLAY_ROOT/kb/LEAKS.md`) before handoff, not only at release.
 
 ## Verification
@@ -73,5 +73,5 @@ public-facing text runs `dotagents leak-check <repo>`
 Reconcile Progress with the working tree: existing code cannot remain `[ ]`; mark it
 done, active with `uncommitted: <files>`, or blocked. Report changed files,
 evidence, unverified items, dirty state and the resolved provider/model/settings.
-Only when no blocker remains: `dotagents plans status <name> done -m "<evidence>"`,
+Only when no blocker remains: `plans status <name> done -m "<evidence>"`,
 which sets `Status: done` and moves the plan to `.agents/plans/completed/`.

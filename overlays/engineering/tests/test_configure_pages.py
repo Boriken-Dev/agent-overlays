@@ -1,4 +1,4 @@
-"""`dotagents configure-pages`: the three settings, in order, with every failure listed and a dry run that changes
+"""`configure-pages`: the three settings, in order, with every failure listed and a dry run that changes
 nothing. `gh` is a recording stand-in."""
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from tools_env import no_machine_agent_files  # noqa: F401  (an autouse fixture)
 
 duho = pytest.importorskip("duho")
 
-MODULE = Path(__file__).resolve().parents[1] / "cmds" / "configure_pages.py"
+MODULE = Path(__file__).resolve().parents[1] / "skills" / "configure-pages" / "configure_pages.py"
 _spec = importlib.util.spec_from_file_location("configure_pages_cmd", MODULE)
 pages = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = pages

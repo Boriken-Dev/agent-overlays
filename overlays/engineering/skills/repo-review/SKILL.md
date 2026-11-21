@@ -19,19 +19,22 @@ record**. It changes no code. Plans come afterwards, only when asked.
 
 ## Tools
 
-Where the harness has `dotagents` as an MCP server (`DOTAGENTS_MCP=stdio`), use the
-tools: a review records many findings, and a tool call costs far less than a process.
+Use the engineering overlay's skills and scripts (each `duho` skill script also serves
+MCP when launched with `<NAME>_MCP=stdio`): a review records many findings, and
+querying or updating via the structured CLI/MCP tools keeps frontmatter and status
+folders consistent.
 
-| Tool | Command line | For |
+| Skill / Script | Command line | For |
 | --- | --- | --- |
-| `dotagents.findings.list`, `.show` | `dotagents findings list` | what is already known |
-| `dotagents.findings.add` | `dotagents findings add "<line>" --body-file <file>` | recording a finding |
-| `dotagents.plans.list`, `.next` | `dotagents plans list` | live plans, so nothing planned is re-raised |
-| `dotagents.plans.add`, `.validate` | `dotagents plans add <name> -t ... -p ...` | writing plans, when asked |
-| `dotagents.leak-check` | `dotagents leak-check <repo>` | the leak scan in the baseline |
-| `dotagents.summarize-run` | `dotagents summarize-run -- <command>` | each baseline check: a verdict, not a log |
-| `dotagents.eol.check` | `dotagents eol check` | line endings |
-| `dotagents.compare-bench` | `dotagents compare-bench <old> <new>` | benchmark results across releases |
+| `records` (`findings`) | `records query findings --where "status = 'active'"` / `records list findings` | what is already known |
+| `records` (`findings`) | `records add findings <slug> --attr severity=high --attr lens=soundness --body-file <file>` | recording a finding |
+| `plans` | `plans list` / `plans query --where "status != 'done'"` | live plans, so nothing planned is re-raised |
+| `plans` | `plans add <name> -t ... -p ...` / `plans validate <name>` | writing plans, when asked |
+| `decisions` | `decisions list` / `decisions query` | recorded architectural decisions |
+| `leak-check` | `leak-check <repo>` | the leak scan in the baseline |
+| `summarize-run` | `summarize-run -- <command>` | each baseline check: a verdict, not a log |
+| `eol` | `eol check` | line endings |
+| `compare-bench` | `compare-bench <old> <new>` | benchmark results across releases |
 
 ## Arguments
 
@@ -83,7 +86,7 @@ Before judging anything:
 Run the project's own checks exactly as it documents them, on the oldest and newest
 supported runtime: tests, type check, docs build, package build, and the benchmarks
 if it has any; the formatter check on the newest only. Run each through
-`dotagents summarize-run -- <command>`, and run the leak scan
+`summarize-run -- <command>`, and run the leak scan
 (`$ENGINEERING_OVERLAY_ROOT/kb/LEAKS.md`). A check that fails, is skipped without
 saying so, or cannot be run as documented is a finding before the review proper
 begins. Build the package and install it into a clean environment; the rest of the
@@ -153,8 +156,7 @@ Nothing is recorded on one reading.
 Use the project's own way, found in this order:
 
 1. what its `AGENTS.md` says;
-2. its findings queue: `dotagents findings add "<line>" --body-file <file>` in the
-   project scope, then `dotagents findings index`;
+2. its findings folder (`<project>/.agents/findings/`): `records add findings <slug> --attr description="<line>" --attr severity=<sev> --attr lens=<lens> --body-file <file>`;
 3. the host's issue tracker, only when the `issues` argument was given or the
    project's notes say so: show the list first, get a yes, then create them. A
    security finding, and anything that names private material, stays in the private
@@ -203,7 +205,7 @@ One file, `<project>/.agents/reviews/<date>_<short sha>.md`:
 - what was not reviewed, and why.
 
 A pattern that no standard covers, or a standard that turned out wrong, is recorded
-against the configuration (`dotagents findings add -g`), not the project.
+against the user-level findings store (`records add findings <slug> -g ...`), not the project.
 
 ## 6. Report
 

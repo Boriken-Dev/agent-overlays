@@ -1,18 +1,23 @@
-<!-- `dotagents plans add <name>` copies this file to
-     <project>/.agents/plans/<snake_case_name>.md and removes these comments; fill
-     every <placeholder>. This skeleton IS the required shape from
-     $ENGINEERING_OVERLAY_ROOT/flows/PLAN.md — do not add, drop, or reorder sections. If a filled
-     example disagrees with this shape, this file wins. -->
+---
+name: <name>
+title: <Plan Title>
+status: draft
+executor: "<family/subrole from MODELS.md> — <one line: why this role>"
+---
+
+<!-- `plans add <name>` copies this file to
+     <project>/.agents/plans/<status>/<snake_case_name>.md (or
+     <project>/.agents/plans/<status>/<snake_case_name>/README.md with --complex)
+     and removes these comments; fill every <placeholder>. This skeleton IS the
+     required shape from $ENGINEERING_OVERLAY_ROOT/flows/PLAN.md — do not add,
+     drop, or reorder sections. -->
 
 # <Plan Title>
-
-Status: draft
-Executor: <family/subrole from MODELS.md> — <one line: why this role>
 
 ## Progress
 
 <!-- [ ] pending · [/] active (set BEFORE writing code) · [x] done — short outcome ·
-     [!] blocked — reason. One line per phase, `Phase <id>: <name>`; `dotagents plans
+     [!] blocked — reason. One line per phase, `Phase <id>: <name>`; `plans
      start|check|block` change it. The box update is part of the step itself —
      never batched at the end. -->
 
@@ -29,7 +34,7 @@ Executor: <family/subrole from MODELS.md> — <one line: why this role>
 ## Phases
 
 <!-- No implementation: paths, signatures, hints, code blocks ≤5 lines.
-     Done-when must be observable. Split per PLAN.md rule 4 above ~150 lines. -->
+     Done-when must be observable. Split into <name>/README.md + <phase>.md above ~150 lines. -->
 
 ### Phase 1: <name>
 

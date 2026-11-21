@@ -1,4 +1,4 @@
-"""`dotagents gate`: steps through summarize-run, the lock, `when` globs, the Linux leg and the merge.
+"""`gate`: steps through summarize-run, the lock, `when` globs, the Linux leg and the merge.
 
 Every test runs on a temporary repository; the Linux distribution is a pass-through to a local bash and the
 push is a recording stand-in for repo-guard."""
@@ -24,7 +24,7 @@ import agent_tools
 
 duho = pytest.importorskip("duho")
 
-MODULE = Path(__file__).resolve().parents[1] / "cmds" / "gate.py"
+MODULE = Path(__file__).resolve().parents[1] / "skills" / "gate" / "gate.py"
 _spec = importlib.util.spec_from_file_location("gate_cmd", MODULE)
 gate_cmd = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = gate_cmd

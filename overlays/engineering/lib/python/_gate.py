@@ -136,7 +136,7 @@ def _summarize_module() -> Any:
     global _SUMMARIZE
     if _SUMMARIZE is None:
         import importlib.util
-        path = Path(__file__).resolve().parents[2] / "cmds" / "summarize_run.py"
+        path = Path(__file__).resolve().parents[2] / "skills" / "summarize-run" / "summarize_run.py"
         spec = importlib.util.spec_from_file_location("gate_summarize_run", path)
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module  # duho resolves field annotations through sys.modules

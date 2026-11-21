@@ -11,12 +11,14 @@ deviation triggers, and never defer a question to execution.
 2. **No implementation**: paths, signatures, hints, a one-line *Why*, and code
    blocks of at most five lines. Commands are complete literals, environment setup
    included; verify undocumented third-party behaviour against the real system.
-3. **Required shape**: title + `Status:`; exact `Executor: family/subrole` from
-   `MODELS.md` plus why; `## Progress`; `## Known Facts & Context`; `## Phases` with
-   files, guidance, Why and observable done-when; `## Verification`; `## Reporting`.
-4. **Right-sized**: split only above ~150 lines or for independently executable
-   phases. A parent keeps facts, progress and a sub-plan status table; each sub-plan
-   holds one phase. Executors read only the parent and their assigned sub-plan.
+3. **Required shape**: YAML frontmatter (`name`, `title`, `status`, `executor`, plus
+   optional attributes like `priority`, `tags`, `links`, `depends_on`), followed by
+   `# <Title>`, `## Progress`, `## Known Facts & Context`, `## Phases` (files,
+   guidance, Why, observable done-when), `## Verification`, `## Reporting`.
+4. **Right-sized**: split above ~150 lines or for independently executable phases
+   using a complex plan directory (`--complex`): `plans/<status>/<name>/README.md`
+   for the overall plan and `<phase|extra>.md` beside it. Executors read `README.md`
+   and their assigned phase file.
 5. **Evidence**: performance baselines before claims, registry metadata before new
    dependencies, per-item consent for bundled approvals. A plan that breaks a
    documented API names its known consumers (dependents, sibling repos), and its
@@ -24,12 +26,10 @@ deviation triggers, and never defer a question to execution.
 
 ## Writing one
 
-Start with `dotagents plans add <name> -t "<title>" -p "<phase>" ...`: it writes
-`$ENGINEERING_OVERLAY_ROOT/references/plan_template.md` filled with those phases
-(shapes drift when imitated from memory or an old plan). `dotagents plans validate
+Start with `plans add <name> -t "<title>" -p "<phase>" ...`: it writes
+`$ENGINEERING_OVERLAY_ROOT/references/plan_template.md` into `plans/draft/`
+(or `plans/draft/<name>/README.md` with `--complex`). `plans validate
 <name>` must pass before the plan is set `ready`.
-`$ENGINEERING_OVERLAY_ROOT/references/master_refactoring_plan.md` illustrates tone
-and detail only; the template wins any disagreement.
 
 Executor kickoff, given with the plan:
 
@@ -39,30 +39,38 @@ Executor kickoff, given with the plan:
 > `[x]` when done); record blockers and continue independent work without asking the
 > user.
 
-## Persistence
+## Persistence & Layout
 
-Resolve the project root before the first write (where plans live: the Plans rule
-in `$ENGINEERING_OVERLAY_ROOT/rules/ENGINEERING.md`). Move an approved harness draft
-there with `Status: ready` and delete the scratch copy. Peer review uses
-`Status: review` and `REVIEW.md`.
+Plans live in `<project>/.agents/plans/<status>/`:
 
-The `plans/` top level holds only live plans (`draft`/`ready`/`review`/`executing`);
-`completed/` holds finished ones, `on-hold/` parked ones. `dotagents plans status
-<name> <status>` sets the status and moves the file together: `done` needs every
-phase checked and `-m` with the evidence, `on-hold` needs `-m` with the reason. Every
-change regenerates `plans/INDEX.md`. A `done` plan at top level is drift: whoever
-sees one moves it.
+- `draft/<name>.md` (`status: draft`)
+- `ready/<name>.md` (`status: ready`)
+- `review/<name>.md` (`status: review`)
+- `executing/<name>.md` (`status: executing`)
+- `on-hold/<name>.md` (`status: on-hold`)
+- `completed/<name>.md` (`status: done`)
 
-## One tool for every plan
+Complex plans replace `<name>.md` with a directory `<name>/README.md` +
+`<phases|extras>.md`. No `INDEX.md` is kept. `plans status <name> <status>`
+updates the frontmatter `status` and moves the file or directory into its folder
+(`done` requires every phase checked and `-m` evidence; `on-hold` requires `-m`
+reason). Other storage backends (`github`, `gitlab`, `jira`, `ai6`) can be wired
+via `.agents/records.toml` (`plans providers`).
+
+## Query, edit and remove
 
 | Need | Command |
 | --- | --- |
-| what exists | `plans list`: one line per plan (status, progress, current phase) |
-| what to do now | `plans next <name>`: the head, the progress list, one phase |
+| what exists | `plans list` / `plans list --where "status = 'ready'"` |
+| SQL search | `plans query "SELECT name, status, done, total, title FROM plans ..."` |
+| what to do now | `plans next <name>`: frontmatter head, progress, current phase |
 | one part | `plans show <name> --section facts` / `--phase 3` |
-| a step | `plans start`, `check -m`, `block -m`, `uncheck`: one line changes |
+| attributes | `plans set <name> --attr key=val` / `--unset key` |
+| body / section | `plans edit <name> --section facts --append "..."` / `--replace old=new` |
+| a step | `plans start`, `check -m`, `block -m`, `uncheck` |
 | a fact learned | `plans note <name> -m "..."` |
-| the shape | `plans validate <name>` |
+| remove / migrate | `plans rm <name>` / `plans migrate` |
+| arbitrary folder | `records query|show|add|set|edit|mv|rm <folder>` |
 
 Do not read a whole plan to learn one thing, or rewrite one to change a line.
 
@@ -72,6 +80,6 @@ Do not read a whole plan to learn one thing, or rewrite one to change a line.
 - Known Facts holds discovered context; Verification runs setup before checks.
 - Optional-test skip counts and expected outcomes are stated.
 - No code block exceeds five lines.
-- `Executor:` names a role present in `MODELS.md`; no raw provider IDs.
+- `executor` in frontmatter names a role present in `MODELS.md`; no raw provider IDs.
 - A rule cited to skip, stub or shrink work is quoted verbatim with `file:line`,
   never paraphrased.

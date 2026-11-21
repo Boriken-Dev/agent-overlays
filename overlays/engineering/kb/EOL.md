@@ -25,12 +25,10 @@ against bytes the source never sent, while it keeps passing.
 ## Checking and converting
 
 ```bash
-dotagents eol check [path ...]            # exit 1 lists every file that is wrong
-dotagents eol check --control [path ...]  # also stray control bytes
-dotagents eol fix [path ...] [--dry-run]
+eol check [path ...]            # exit 1 lists every file that is wrong
+eol check --control [path ...]  # also stray control bytes
+eol fix [path ...] [--dry-run]
 ```
-
-Over MCP: `dotagents.eol.check`, `dotagents.eol.fix`.
 
 The command reads the repository's attributes: `eol=crlf` files are expected to be
 CRLF and `-text` files are left alone. So is a file git stores as non-text (`git
@@ -71,7 +69,7 @@ path.write_text(text, encoding="utf-8", newline="\n")           # 3.10 and later
 
 Write an edit script to a file and run it. A script passed inline through a shell
 can lose a level of backslashes, turning `\r\n` written as text into a real carriage
-return and `\b` into a backspace byte; `dotagents eol check --control` finds those.
+return and `\b` into a backspace byte; `eol check --control` finds those.
 
 ## Changing an existing file
 

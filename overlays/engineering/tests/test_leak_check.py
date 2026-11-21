@@ -20,7 +20,7 @@ from pathlib import Path
 pytest = __import__("pytest")
 duho = pytest.importorskip("duho")
 
-TOOL = Path(__file__).resolve().parents[1] / "cmds" / "leak_check.py"
+TOOL = Path(__file__).resolve().parents[1] / "skills" / "leak-check" / "leak_check.py"
 _spec = importlib.util.spec_from_file_location("leak_check", TOOL)
 leak_check = importlib.util.module_from_spec(_spec)
 # duho resolves a command's field annotations through sys.modules.
@@ -764,10 +764,9 @@ class PlanLabels(Base):
 
 
 class TheCommand(unittest.TestCase):
-    def test_dotagents_runs_it_by_name(self) -> None:
+    def test_script_runs_from_command_line(self) -> None:
         """End to end through the real command line, with an empty agent store
         so nothing from the machine is discovered."""
-        pytest.importorskip("dotagents")
         with tempfile.TemporaryDirectory(prefix="leakchk-cmd-") as tmp:
             root = Path(tmp).resolve()
             app = root / "app"
@@ -776,8 +775,7 @@ class TheCommand(unittest.TestCase):
                        HOME=str(root), USERPROFILE=str(root))
             env.pop("AGENTS_PROJECT_ROOT", None)
             out = subprocess.run(
-                [sys.executable, "-m", "dotagents", "--cmdspath", str(TOOL.parent),
-                 "leak-check", str(app), "--commits-only"],
+                [sys.executable, str(TOOL), str(app), "--commits-only"],
                 capture_output=True, text=True, env=env, cwd=str(root))
             self.assertEqual(out.returncode, leak_check.EXIT_CANNOT_CHECK,
                              out.stdout + out.stderr)

@@ -1,4 +1,4 @@
-"""`dotagents compare-bench` compares on the median and its exit code is the verdict."""
+"""`compare-bench` compares on the median and its exit code is the verdict."""
 from __future__ import annotations
 
 import importlib.util
@@ -10,7 +10,7 @@ import pytest
 
 duho = pytest.importorskip("duho")
 
-MODULE = Path(__file__).resolve().parents[1] / "cmds" / "compare_bench.py"
+MODULE = Path(__file__).resolve().parents[1] / "skills" / "compare-bench" / "compare_bench.py"
 _spec = importlib.util.spec_from_file_location("compare_bench_cmd", MODULE)
 compare_bench = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = compare_bench  # duho resolves field annotations through sys.modules

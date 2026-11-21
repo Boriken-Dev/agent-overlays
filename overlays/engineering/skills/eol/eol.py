@@ -1,7 +1,7 @@
-"""`dotagents eol` -- check and fix line endings, safely.
+"""`eol` -- check and fix line endings, safely.
 
-    dotagents eol check [path ...]
-    dotagents eol fix   [path ...] [--dry-run]
+    eol check [path ...]
+    eol fix   [path ...] [--dry-run]
 
 Every text file is LF, unless the repository's own attributes say otherwise:
 
@@ -245,7 +245,7 @@ class Eol(LoggingArgs, Cli):
                 return EXIT_CANNOT_CHECK
             found = len(wrong) + len(strays)
             print("%s: %s" % (self.summary(seen),
-                              "%d to fix (`dotagents eol fix`)" % len(wrong) if wrong else "all as expected")
+                              "%d to fix (`eol fix`)" % len(wrong) if wrong else "all as expected")
                   + (", %d with control bytes" % len(strays) if strays else ""))
             return EXIT_OFFENDERS if found else EXIT_OK
 
@@ -301,3 +301,9 @@ class Eol(LoggingArgs, Cli):
                 raise
 
     _subcommands_ = [Check, Fix]
+
+
+if __name__ == "__main__":
+    from duho import main as _duho_main
+
+    raise SystemExit(_duho_main(Eol))

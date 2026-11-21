@@ -5,8 +5,8 @@ owns the plan; each **reviewer** owns one report file. All communication is thro
 files, never a shared conversation. The plan is `Status: review` while this runs.
 
 ## Files
-- Plan: `.agents/plans/<name>.md`; only main edits it.
-- Reports: `.agents/plans/<name>/reviews/<reviewer-id>.md` (e.g. `gemini.md`). The
+- Plan: `.agents/plans/review/<name>.md` (or `<name>/README.md`); only main edits it.
+- Reports: `.agents/plans/review/<name>/reviews/<reviewer-id>.md` (e.g. `gemini.md`). The
   reviewer creates it; main and reviewer both append; nothing is rewritten or
   deleted, so the thread is the audit trail.
 

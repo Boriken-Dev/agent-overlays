@@ -1,9 +1,9 @@
-"""`dotagents gate` -- the checks a branch passes before it is merged.
+"""`gate` -- the checks a branch passes before it is merged.
 
-    dotagents gate run   WORKTREE [--step NAME]... [--out DIR] [--fail-fast]
-    dotagents gate wsl   WORKTREE [--out DIR]
-    dotagents gate merge BRANCH [-C DIR] [--no-push] [--out DIR]
-    dotagents gate lock  LABEL -- CMD...
+    gate run   WORKTREE [--step NAME]... [--out DIR] [--fail-fast]
+    gate wsl   WORKTREE [--out DIR]
+    gate merge BRANCH [-C DIR] [--no-push] [--out DIR]
+    gate lock  LABEL -- CMD...
 
 `run` refuses a tree in the middle of a rebase, a merge or a cherry-pick, or with unmerged paths. It takes the
 machine-wide gate lock (waiting for it), then runs each step of `[gate] steps` through `summarize-run`, each
@@ -33,9 +33,23 @@ from pathlib import Path
 
 from duho import Cli, Cmd, LoggingArgs
 
-_LIB = str(Path(__file__).resolve().parents[1] / "lib" / "python")
-if _LIB not in sys.path:
-    sys.path.insert(0, _LIB)
+def _resolve_lib_dir() -> Path:
+    import os
+    for env_key in ("ENGINEERING_OVERLAY_ROOT", "AOS_OVERLAY_ROOT"):
+        val = os.environ.get(env_key)
+        if val and (Path(val) / "lib" / "python").is_dir():
+            return Path(val) / "lib" / "python"
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "lib" / "python"
+        if candidate.is_dir():
+            return candidate
+    return here.parents[2] / "lib" / "python"
+
+
+_LIB = _resolve_lib_dir()
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
 
 import _gate  # noqa: E402
 import _slots  # noqa: E402
@@ -173,3 +187,9 @@ class Gate(LoggingArgs, Cli):
             return _guarded(hold)
 
     _subcommands_ = [Run, Wsl, Merge, Lock]
+
+
+if __name__ == "__main__":
+    from duho import main as _duho_main
+
+    raise SystemExit(_duho_main(Gate))

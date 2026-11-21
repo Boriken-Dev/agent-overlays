@@ -1,6 +1,6 @@
-"""`dotagents configure-pages` -- set a repository's GitHub Pages docs-site settings to the project standard.
+"""`configure-pages` -- set a repository's GitHub Pages docs-site settings to the project standard.
 
-    dotagents configure-pages OWNER/REPO [--tag-pattern v*] [--branch main] [--dry-run]
+    configure-pages OWNER/REPO [--tag-pattern v*] [--branch main] [--dry-run]
 
 A workflow can enable Pages and build and deploy the docs site, but three repository-level settings cannot be set
 by the workflow itself, and they fail with errors that name a REST endpoint rather than the missing setting, so
@@ -242,3 +242,9 @@ class ConfigurePages(LoggingArgs, Cmd):
             return 2
         FAILURES.clear()
         return run(self.repo, self.tag_pattern, self.branch, self.dry_run)
+
+
+if __name__ == "__main__":
+    from duho import main as _duho_main
+
+    raise SystemExit(_duho_main(ConfigurePages))

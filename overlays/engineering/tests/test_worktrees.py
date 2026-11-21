@@ -1,4 +1,4 @@
-"""`dotagents worktrees`: merged worktrees are the ones whose patches are all upstream; --remove skips a dirty one."""
+"""`worktrees`: merged worktrees are the ones whose patches are all upstream; --remove skips a dirty one."""
 from __future__ import annotations
 
 import importlib.util
@@ -12,7 +12,7 @@ from tools_env import no_machine_agent_files  # noqa: F401  (an autouse fixture)
 
 duho = pytest.importorskip("duho")
 
-MODULE = Path(__file__).resolve().parents[1] / "cmds" / "worktrees.py"
+MODULE = Path(__file__).resolve().parents[1] / "skills" / "worktrees" / "worktrees.py"
 _spec = importlib.util.spec_from_file_location("worktrees_cmd", MODULE)
 worktrees = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = worktrees

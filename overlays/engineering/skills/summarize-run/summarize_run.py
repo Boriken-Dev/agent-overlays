@@ -1,7 +1,7 @@
-"""`dotagents summarize-run` -- run a noisy command, print a verdict an agent can read cheaply.
+"""`summarize-run` -- run a noisy command, print a verdict an agent can read cheaply.
 
-    dotagents summarize-run -- pytest -q
-    dotagents summarize-run -o build.log -- npm run build
+    summarize-run -- pytest -q
+    summarize-run -o build.log -- npm run build
 
 Run a build, test or lint command through this instead of reading its raw
 output. It prints one verdict line, where the full log went, and only the
@@ -151,3 +151,9 @@ class SummarizeRun(LoggingArgs, Cmd):
         if stream is None:
             return ""
         return stream if isinstance(stream, str) else stream.decode("utf-8", "replace")
+
+
+if __name__ == "__main__":
+    from duho import main as _duho_main
+
+    raise SystemExit(_duho_main(SummarizeRun))

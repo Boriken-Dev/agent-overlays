@@ -27,7 +27,7 @@ from the first `## ` heading down is documentation and is not merged.
   is none of the three.)
 - **Leakage**: never create `CLAUDE.md` or commit private agent config unless asked.
   A repo's `.gitignore` excludes `.agents` (slashless: a directory-only `.agents/`
-  misses a symlink), `CLAUDE*`, `.claude`. Never print `DOTAGENTS_*` values (no bare
+  misses a symlink), `CLAUDE*`, `.claude`. Never print secret environment values (no bare
   `env`/`printenv`): they hold secrets; test emptiness instead.
 - **Comments and doc comments**: say what the code cannot — the constraint, the
   reason, the unit — in one to three lines, about the code as it is: no history, no
@@ -38,7 +38,7 @@ from the first `## ` heading down is documentation and is not merged.
   `$ENGINEERING_OVERLAY_ROOT/kb/COMMENTS.md`.
 - **Line endings**: every text file is LF, on every platform, and a repo's
   `.gitattributes` says so (`* text=auto eol=lf`). Check and convert with
-  `dotagents eol check` / `dotagents eol fix`, never a hand-written one-liner (that
+  `eol check` / `eol fix`, never a hand-written one-liner (that
   is how files get emptied). Bytes someone else chose (a recorded response, a copied
   golden file) are marked `-text` and left alone. A script that writes a file opens
   it with `newline=""` or writes bytes. `$ENGINEERING_OVERLAY_ROOT/kb/EOL.md`.
@@ -89,24 +89,30 @@ from the first `## ` heading down is documentation and is not merged.
   then it is a hypothesis, and no platform-conditional code or tolerance is added
   for it.
 - **Don't pay tokens for what a script can decide**: never read a whole log to learn
-  one bit ("did it pass?"); `dotagents summarize-run -o build.log -- <cmd>` prints a
+  one bit ("did it pass?"); `summarize-run -o build.log -- <cmd>` prints a
   verdict and keeps the log on disk. Doing the same manual scan twice? Write the
   script.
 - **Draft follow-ups**: adjacent work found mid-execution gets a `Status: draft` plan
   (idea + scope + why) in the project's `.agents/plans/`, never executed in the same
   pass.
-- **Plans**: always `<project>/.agents/plans/<name>.md`, snake_case; sub-plans at
-  `.../<name>/<sub>.md`; finished → `plans/completed/` (sub-tree kept). Create, read,
-  step and close them with `dotagents plans` (`add`, `next`, `start`, `check`,
-  `status`), as each step happens, not at the end. **`~/.agents/plans/` is never a
-  plan home**: re-home harness drafts into the project and delete the copy.
+- **Plans**: always `<project>/.agents/plans/<status>/<name>.md` (or
+  `<status>/<name>/README.md` + `<phase|extra>.md` for complex plans), snake_case,
+  with YAML frontmatter for fields/attributes and context after frontmatter; no
+  `INDEX.md`. Create, query, step, edit and move them with `plans`
+  (`add`, `list`, `query`, `next`, `start`, `check`, `set`, `edit`, `status`, `rm`),
+  or any folder with `records`, as each step happens, not at the end.
+  **`~/.agents/plans/` is never a plan home**: re-home harness drafts into the
+  project and delete the copy.
+- **Decisions**: `<project>/.agents/decisions/<status>/<Dnn_slug>.md` (`proposed`,
+  `decided`, `superseded`) with YAML frontmatter and context after frontmatter;
+  no `INDEX.md`. Settled decisions are superseded (`decisions supersede`),
+  never deleted.
 
-## Why these are not in the base
+## Why these are not in a minimal starter
 
-`dotagents init` lays down a minimal, neutral starter: its always-on rules are only
-the ones the tool relies on (reading every level's `AGENTS.md`, the permissions
-inside `.agents/`, the findings queue for config misses, the managed-marker contract).
-Everything here is convention on top. Nothing in the tool requires the `plans/`
-layout, and `dotagents findings` works without anyone using a queue, so a user who
+A minimal starter lays down only the base rules (reading every level's `AGENTS.md`, the permissions
+inside `.agents/`, the findings folder for config misses, the managed-marker contract).
+Everything here is convention on top. Nothing in the base requires the `plans/`
+layout, and `records` works over any folder without a fixed schema, so a user who
 files work differently need not fight their config. `Releases` is always-on rather
 than behind a flow file because a release is irreversible; opt in deliberately.

@@ -1,4 +1,4 @@
-"""`dotagents summarize-run` finds the command the way a shell would, gives every
+"""`summarize-run` finds the command the way a shell would, gives every
 run its own log, and returns the command's own exit code."""
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import pytest
 
 duho = pytest.importorskip("duho")
 
-MODULE = Path(__file__).resolve().parents[1] / "cmds" / "summarize_run.py"
+MODULE = Path(__file__).resolve().parents[1] / "skills" / "summarize-run" / "summarize_run.py"
 _spec = importlib.util.spec_from_file_location("summarize_run_cmd", MODULE)
 summarize_run = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = summarize_run  # duho resolves field annotations through sys.modules

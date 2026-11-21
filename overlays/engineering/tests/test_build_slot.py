@@ -1,4 +1,4 @@
-"""`dotagents build-slot`: a heavy build starts only while a slot is free, and the limit file, the gate directory and
+"""`build-slot`: a heavy build starts only while a slot is free, and the limit file, the gate directory and
 the lock directory are the ones the earlier `build_slot.py` script and the shell gates used, so old and new
 callers can run at the same time."""
 from __future__ import annotations
@@ -19,7 +19,7 @@ import _slots
 
 duho = pytest.importorskip("duho")
 
-MODULE = Path(__file__).resolve().parents[1] / "cmds" / "build_slot.py"
+MODULE = Path(__file__).resolve().parents[1] / "skills" / "build-slot" / "build_slot.py"
 _spec = importlib.util.spec_from_file_location("build_slot_cmd", MODULE)
 build_slot = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = build_slot

@@ -1,6 +1,6 @@
-"""`dotagents build-slot` -- run a heavy build only while fewer than a limit of them run on this machine.
+"""`build-slot` -- run a heavy build only while fewer than a limit of them run on this machine.
 
-    dotagents build-slot [--limit N] [--max-wait S] [--every S] [--settle S] -- CMD...
+    build-slot [--limit N] [--max-wait S] [--every S] [--settle S] -- CMD...
 
 A heavy build is a running cargo, rustc, Flutter test or Dart build or test; `[build_slot] processes` in
 `~/.agents/agent-tools.local.toml` changes the names, and `wsl = [distro, ...]` counts them inside those WSL
@@ -28,9 +28,23 @@ from pathlib import Path
 
 from duho import Cmd, LoggingArgs
 
-_LIB = str(Path(__file__).resolve().parents[1] / "lib" / "python")
-if _LIB not in sys.path:
-    sys.path.insert(0, _LIB)
+def _resolve_lib_dir() -> Path:
+    import os
+    for env_key in ("ENGINEERING_OVERLAY_ROOT", "AOS_OVERLAY_ROOT"):
+        val = os.environ.get(env_key)
+        if val and (Path(val) / "lib" / "python").is_dir():
+            return Path(val) / "lib" / "python"
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidate = parent / "lib" / "python"
+        if candidate.is_dir():
+            return candidate
+    return here.parents[2] / "lib" / "python"
+
+
+_LIB = _resolve_lib_dir()
+if str(_LIB) not in sys.path:
+    sys.path.insert(0, str(_LIB))
 
 import _slots  # noqa: E402
 import agent_tools  # noqa: E402
@@ -73,3 +87,9 @@ class BuildSlot(LoggingArgs, Cmd):
         slot = _slots.Slot(_slots.SlotConfig.from_config(config))
         return slot.run(cmd, limit=self.limit or None, max_wait=self.max_wait, every=self.every,
                         settle=self.settle)
+
+
+if __name__ == "__main__":
+    from duho import main as _duho_main
+
+    raise SystemExit(_duho_main(BuildSlot))
