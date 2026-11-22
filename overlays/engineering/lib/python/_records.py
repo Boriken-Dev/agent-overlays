@@ -1385,18 +1385,219 @@ class GitHubProvider(_LabelStatusProvider):
         self._gh("issue", "delete", item["key"], "--yes")
 
 
-class GitLabProvider(ExternalTrackerProvider):
+class GitLabProvider(_LabelStatusProvider):
+    """GitLab issues (or merge requests, ``kind = "mr"``) through the person's logged-in ``glab api``."""
+
     required_keys = ("project",)
+    wired = True
 
     def __init__(self, config: "Optional[dict[str, Any]]" = None):
         super().__init__("gitlab", config)
 
+    @property
+    def _is_mr(self) -> bool:
+        return str(self.config.get("kind") or "issue").lower() in ("mr", "merge_request")
+
+    @property
+    def _endpoint(self) -> str:
+        project = urllib.parse.quote(str(self.config["project"]), safe="")
+        return "projects/%s/%s" % (project, "merge_requests" if self._is_mr else "issues")
+
+    def _api(self, path: str, method: str = "GET", payload: "Optional[dict[str, Any]]" = None) -> Any:
+        cmd = _cli_command(self.config, "glab", "install GitLab CLI and run `glab auth login`")
+        argv = cmd + ["api", path, "-X", method]
+        stdin = None
+        if payload is not None:
+            argv += ["-H", "Content-Type: application/json", "--input", "-"]
+            stdin = json.dumps(payload)
+        out = _run_cli(argv, stdin=stdin).strip()
+        return json.loads(out) if out else None
+
+    def _normalize(self, raw: "dict[str, Any]") -> "dict[str, Any]":
+        labels = [str(l) for l in raw.get("labels") or []]
+        closed = str(raw.get("state", "")) != "opened"
+        return {
+            "key": str(raw["iid"]),
+            "title": raw.get("title") or "",
+            "body": raw.get("description") or "",
+            "labels": labels,
+            "open": not closed,
+            "status": self._status_of(labels, closed),
+            "created": raw.get("created_at") or "",
+            "updated": raw.get("updated_at") or "",
+            "url": raw.get("web_url") or "",
+        }
+
+    def _items(self) -> "list[dict[str, Any]]":
+        out: "list[dict[str, Any]]" = []
+        page = 1
+        while True:
+            rows = self._api("%s?state=all&per_page=100&page=%d" % (self._endpoint, page)) or []
+            out.extend(self._normalize(r) for r in rows)
+            if len(rows) < 100:
+                return out
+            page += 1
+
+    def _item(self, key: str) -> "dict[str, Any]":
+        if not key.isdigit():
+            raise fail("%r: a GitLab record's name is its number" % (key,))
+        return self._normalize(self._api("%s/%s" % (self._endpoint, key)))
+
+    def _make(self, title: str, body: str, status: str) -> str:
+        if self._is_mr:
+            raise fail("a merge request is opened from a branch, not created as a record")
+        raw = self._api(self._endpoint, "POST", {
+            "title": title, "description": body, "labels": self.status_prefix + status,
+        })
+        key = str(raw["iid"])
+        if status in self.closed_statuses:
+            self._api("%s/%s" % (self._endpoint, key), "PUT", {"state_event": "close"})
+        return key
+
+    def _edit(self, item: "dict[str, Any]", title: str, body: str) -> None:
+        self._api("%s/%s" % (self._endpoint, item["key"]), "PUT", {"title": title, "description": body})
+
+    def _transition(self, item: "dict[str, Any]", new_status: str) -> None:
+        label = self.status_prefix + new_status
+        payload: "dict[str, Any]" = {"add_labels": label}
+        old = [l for l in self._status_labels(item) if l != label]
+        if old:
+            payload["remove_labels"] = ",".join(old)
+        closing = new_status in self.closed_statuses
+        if closing and item["open"]:
+            payload["state_event"] = "close"
+        elif not closing and not item["open"]:
+            payload["state_event"] = "reopen"
+        self._api("%s/%s" % (self._endpoint, item["key"]), "PUT", payload)
+
+    def _remove(self, item: "dict[str, Any]") -> None:
+        self._api("%s/%s" % (self._endpoint, item["key"]), "DELETE")
+
 
 class JiraProvider(ExternalTrackerProvider):
+    """Jira issues over REST API v2. Credentials come from environment variables the configuration names
+    (``token_env``, default ``JIRA_API_TOKEN``; ``user`` or ``user_env`` for basic auth, else the token is a bearer
+    token); nothing is written to a file. ``status_map`` maps record statuses to Jira status names."""
+
     required_keys = ("url", "project")
+    wired = True
+    block_open = "{code:records}"
+    block_close = "{code}"
+    _FIELDS = "summary,description,status,created,updated"
 
     def __init__(self, config: "Optional[dict[str, Any]]" = None):
         super().__init__("jira", config)
+
+    def _norm_key(self, name: str) -> str:
+        return str(name).strip().upper()
+
+    @property
+    def _status_map(self) -> "dict[str, str]":
+        raw = self.config.get("status_map")
+        return {str(k).lower(): str(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
+
+    def _status_of(self, jira_name: str) -> str:
+        for status, name in self._status_map.items():
+            if name.lower() == jira_name.lower():
+                return status
+        return jira_name.lower()
+
+    def _auth(self) -> str:
+        env = str(self.config.get("token_env") or "JIRA_API_TOKEN")
+        token = os.environ.get(env, "")
+        if not token:
+            raise fail("set the environment variable %s to a Jira API token" % env)
+        user = self.config.get("user") or os.environ.get(str(self.config.get("user_env") or "-"), "")
+        if user:
+            return "Basic " + base64.b64encode(("%s:%s" % (user, token)).encode("utf-8")).decode("ascii")
+        return "Bearer " + token
+
+    def _call(self, path: str, method: str = "GET", payload: "Optional[dict[str, Any]]" = None) -> Any:
+        base = str(self.config["url"]).rstrip("/")
+        if not base.startswith(("http://", "https://")):
+            raise fail("jira url must start with https:// (got %r)" % base)
+        data = json.dumps(payload).encode("utf-8") if payload is not None else None
+        req = urllib.request.Request(base + path, data=data, method=method, headers={
+            "Authorization": self._auth(), "Accept": "application/json", "Content-Type": "application/json",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                text = resp.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace").strip().replace("\n", " ")[:200]
+            raise fail("jira %s %s: HTTP %d %s" % (method, path.split("?")[0], exc.code, detail))
+        except urllib.error.URLError as exc:
+            raise fail("jira %s: %s" % (base, exc.reason))
+        return json.loads(text) if text.strip() else None
+
+    def _normalize(self, raw: "dict[str, Any]") -> "dict[str, Any]":
+        f = raw.get("fields") or {}
+        return {
+            "key": raw["key"],
+            "title": f.get("summary") or "",
+            "body": f.get("description") or "",
+            "status": self._status_of(str((f.get("status") or {}).get("name") or "")),
+            "created": f.get("created") or "",
+            "updated": f.get("updated") or "",
+            "url": "%s/browse/%s" % (str(self.config["url"]).rstrip("/"), raw["key"]),
+        }
+
+    def _items(self) -> "list[dict[str, Any]]":
+        jql = urllib.parse.quote('project = "%s" ORDER BY created ASC' % self.config["project"])
+        cloud = str(self.config.get("flavor") or "cloud").lower() != "server"
+        out: "list[dict[str, Any]]" = []
+        token, start = "", 0
+        while True:
+            if cloud:
+                path = "/rest/api/2/search/jql?jql=%s&fields=%s&maxResults=100" % (jql, self._FIELDS)
+                if token:
+                    path += "&nextPageToken=" + urllib.parse.quote(token)
+            else:
+                path = "/rest/api/2/search?jql=%s&fields=%s&maxResults=100&startAt=%d" % (jql, self._FIELDS, start)
+            page = self._call(path) or {}
+            rows = page.get("issues") or []
+            out.extend(self._normalize(r) for r in rows)
+            if cloud:
+                token = page.get("nextPageToken") or ""
+                if not token or not rows:
+                    return out
+            else:
+                start += len(rows)
+                if not rows or start >= int(page.get("total") or 0):
+                    return out
+
+    def _item(self, key: str) -> "dict[str, Any]":
+        return self._normalize(self._call("/rest/api/2/issue/%s?fields=%s" % (urllib.parse.quote(key), self._FIELDS)))
+
+    def _make(self, title: str, body: str, status: str) -> str:
+        raw = self._call("/rest/api/2/issue", "POST", {"fields": {
+            "project": {"key": str(self.config["project"])},
+            "summary": title,
+            "description": body,
+            "issuetype": {"name": str(self.config.get("issue_type") or "Task")},
+        }})
+        item = self._item(raw["key"])
+        if item["status"] != status and status in self._status_map:
+            self._transition(item, status)
+        return raw["key"]
+
+    def _edit(self, item: "dict[str, Any]", title: str, body: str) -> None:
+        self._call("/rest/api/2/issue/" + urllib.parse.quote(item["key"]), "PUT",
+                   {"fields": {"summary": title, "description": body}})
+
+    def _transition(self, item: "dict[str, Any]", new_status: str) -> None:
+        target = self._status_map.get(new_status, new_status)
+        base = "/rest/api/2/issue/%s/transitions" % urllib.parse.quote(item["key"])
+        options = (self._call(base) or {}).get("transitions") or []
+        for t in options:
+            if str((t.get("to") or {}).get("name", "")).lower() == target.lower():
+                self._call(base, "POST", {"transition": {"id": t["id"]}})
+                return
+        names = ", ".join(sorted(str((t.get("to") or {}).get("name", "")) for t in options)) or "none"
+        raise fail("%s cannot move to %r from here (Jira offers: %s)" % (item["key"], target, names))
+
+    def _remove(self, item: "dict[str, Any]") -> None:
+        self._call("/rest/api/2/issue/" + urllib.parse.quote(item["key"]), "DELETE")
 
 
 class Ai6Provider(ExternalTrackerProvider):
