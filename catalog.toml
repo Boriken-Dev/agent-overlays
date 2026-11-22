@@ -5,7 +5,7 @@ about = "Eight overlays in the Agent Overlay Specification format, each a folder
 
 [overlays.engineering]
 source = "overlays/engineering"
-description = "Always-on discipline for an agent that works in your repositories: commit shape, release-tag consent, benchmark evidence and token discipline. Adds the plan, execute, review and parallel-work workflows, language-neutral repository templates, and the commands plans, leak-check, eol, summarize-run, compare-bench, build-slot, gate, merge, worktrees and configure-pages."
+description = "Always-on discipline for an agent that works in your repositories: commit shape, release-tag consent, benchmark evidence and token discipline. Adds the plan, execute, review and parallel-work workflows, language-neutral repository templates, and the commands plans, leak-check, context-check, eol, summarize-run, compare-bench, build-slot, gate, merge, worktrees and configure-pages."
 
 [overlays.engineering.about]
 summary = "Process rules, plan and review workflows, and repository templates for agent-run engineering."

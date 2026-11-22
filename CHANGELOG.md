@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- engineering: the command `context-check` warns about agent context files outside the standard places (`AGENTS.md` and
+  `AGENTS.*.md` in a directory and in its `.agents`; `AGENTS_DIR` and `AGENTS_CONTEXT` change the names): another tool's file
+  such as `CLAUDE.md`, `GEMINI.md` or `.cursorrules` (with where its text goes), a misnamed `agents.md`, and a `.agents` folder or
+  `AGENTS.local.md` that a commit would hold. `--allow` leaves out a path the project keeps on purpose. `flows/REPO.md` states the
+  standard.
 - engineering: `lib/python/agent_tools.py`, the reader of the two agent-tools files (`<project>/.agents/agent-tools.toml`, the
   machine's `agent-tools.local.toml`; unknown keys refused with file and key) and the one commit-message rule: no
   `Co-Authored-By:` naming a model or an assistant, no `*-Session:` trailer, no session URL, no "Generated with" footer.

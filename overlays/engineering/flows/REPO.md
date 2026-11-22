@@ -131,6 +131,14 @@ release, and the docs site must be redeployable between releases.
   (name, one line, path) and never restates it; each fact has one home. A file read
   before every task fits in about 150 lines; past that, move its largest topic down
   into a routed file.
+- **Agent context has one standard place** (the Agent Overlay Specification's "Project context files"): `AGENTS.md` and
+  `AGENTS.*.md` in a directory, and the same names in that directory's `.agents`, deeper directories overriding broader ones and
+  `.local` files last. `AGENTS_DIR` (default `.agents`) and `AGENTS_CONTEXT` (default `AGENTS.md` and `AGENTS.*.md`) are lists in
+  the platform's path-list separator that change the directory names and the file names. Put no other tool's context file in a
+  repository (`CLAUDE.md`, `GEMINI.md`, `.cursorrules`, `.github/copilot-instructions.md`): a harness that does not read
+  `AGENTS.md` is handed the files by the host that runs it. A project that must keep one (a `CLAUDE.md` that only imports
+  `AGENTS.md`) says so to the check with `--allow`. `context-check <repo>` reports what a commit would hold outside these places,
+  with where each belongs; run it with the leak scan.
 - **`*.local.*` anywhere: never committed, never packaged.** These are one person's
   or one machine's overrides. Fit both guards explicitly; neither is automatic:
   - **`.gitignore`**: `*.local.*`, or the first `AGENTS.local.md` is tracked.
