@@ -1,13 +1,12 @@
 """repo-guard: commit and push under one identity with no agent attribution, deps in step, CI once.
 
-Every test runs on a temporary repository with a local bare remote; `dotagents` is a stand-in that prints
+Every test runs on a temporary repository with a local bare remote; `leak-check` is a stand-in script that prints
 the verdict the test asks for, and the host of `ci` is a fake."""
 
 from __future__ import annotations
 
 import importlib.util
 import os
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -49,13 +48,12 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_TOOLS_LOCAL", str(local))
     stubs = tmp_path / "stubs"
     stubs.mkdir()
-    if os.name == "nt":
-        (stubs / "dotagents.cmd").write_text("@echo off\r\necho %LEAK_VERDICT%\r\nif \"%LEAK_VERDICT:~0,4%\"==\"PASS\" (exit /b 0) else (exit /b 1)\r\n", encoding="utf-8")
-    else:
-        stub = stubs / "dotagents"
-        stub.write_text('#!/bin/sh\necho "$LEAK_VERDICT"\ncase "$LEAK_VERDICT" in PASS*) exit 0;; *) exit 1;; esac\n', encoding="utf-8")
-        stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setenv("PATH", str(stubs) + os.pathsep + os.environ["PATH"])
+    stub = stubs / "skills" / "leak-check" / "leak_check.py"
+    stub.parent.mkdir(parents=True)
+    stub.write_text(
+        "import os, sys\nverdict = os.environ['LEAK_VERDICT']\nprint(verdict)\n"
+        "sys.exit(0 if verdict.startswith('PASS') else 1)\n", encoding="utf-8")
+    monkeypatch.setenv("ENGINEERING_OVERLAY_ROOT", str(stubs))
     monkeypatch.setenv("LEAK_VERDICT", "PASS")
     return work, bare
 

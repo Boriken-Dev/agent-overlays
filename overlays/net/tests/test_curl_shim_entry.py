@@ -46,7 +46,7 @@ def test_real_curl_is_never_this_launcher(tmp_path, monkeypatch):
     real_dir = tmp_path / "system"
     real_dir.mkdir()
     real = _fake_real_curl(real_dir)
-    # The overlay's bin/ FIRST on PATH, exactly as `dotagents env` arranges it.
+    # The overlay's bin/ FIRST on PATH, exactly as a session arranges it.
     _path(monkeypatch, BIN, real_dir)
     found = curlshim.find_real_curl(curl.entry())
     assert found is not None and Path(found).resolve() == real.resolve()
@@ -132,7 +132,7 @@ def test_requirements_take_both_packages_from_pypi_in_one_minor_series():
 
 
 def test_the_launcher_puts_the_libs_on_pythonpath_for_what_it_starts(tmp_path):
-    """Outside a `dotagents env` session nothing else puts the overlay libs on
+    """Outside a session nothing else puts the overlay libs on
     PYTHONPATH, so the launcher does, for the real curl, a URL hook and what
     they start: its own lib, then $AGENTS_PYTHONPATH, then the caller's."""
     import shutil

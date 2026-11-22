@@ -9,7 +9,7 @@
 `*-Session:` trailer, a session URL, a "Generated with" footer) and commits as the configured identity.
 
 `push` checks every commit above REMOTE/MAIN (author and committer are the identity, no forbidden trailer), that
-HEAD fast-forwards REMOTE/MAIN, `dotagents leak-check`, the repository's `tools/build.py scan --all-refs` and each
+HEAD fast-forwards REMOTE/MAIN, the engineering overlay's `leak-check` script, the repository's `tools/build.py scan --all-refs` and each
 `pre_push` command; then pushes `HEAD:MAIN` and fast-forwards the `checkout` when one is set. When
 `tools/build.cfg` has a `[deps]` table and a lock file it names changed, `deps` follows.
 
@@ -188,11 +188,18 @@ def check_commits(guard: Guard, before: str, head: str) -> None:
         guard.check_message(body, f"commit {sha[:10]}")
 
 
+def _leak_check_script() -> Path:
+    """The engineering overlay's `leak-check` script: `$ENGINEERING_OVERLAY_ROOT`, else the overlay beside this one."""
+    for root in (os.environ.get("ENGINEERING_OVERLAY_ROOT"), str(OVERLAY.parent / "engineering")):
+        script = Path(root) / "skills" / "leak-check" / "leak_check.py" if root else None
+        if script and script.is_file():
+            return script
+    raise Refused("the engineering overlay's skills/leak-check/leak_check.py is not found, so leak-check cannot run")
+
+
 def leak_check(guard: Guard) -> None:
-    dotagents = shutil.which("dotagents")
-    if not dotagents:
-        raise Refused("dotagents is not on PATH, so leak-check cannot run")
-    out = run([dotagents, "leak-check", guard.repo], check=False, capture=True)
+    python = os.environ.get("AGENTS_PYTHON") or sys.executable
+    out = run([python, "-I", str(_leak_check_script()), guard.repo], check=False, capture=True)
     verdict = last_line(out.stdout)
     print(verdict)
     if out.returncode != 0 or not verdict.startswith("PASS"):
