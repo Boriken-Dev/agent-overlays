@@ -178,19 +178,26 @@ class Plan:
         *,
         meta: "Optional[dict[str, Any]]" = None,
         extras: "Optional[list[Path]]" = None,
+        folder_status: str = "",
     ):
         self.path = Path(path)
         self.lines = list(lines)
         self.name = name
         self.meta: "dict[str, Any]" = dict(meta or {})
         self.extras: "list[Path]" = list(extras or [])
+        # The status folder the plan sits in; empty for a legacy plan at the root, whose frontmatter still says it.
+        self.folder_status = folder_status
+        # The name is the file's and the status the folder's: neither is kept in the frontmatter.
+        self.meta.pop("name", None)
+        if folder_status:
+            self.meta.pop("status", None)
 
     @property
     def is_complex(self) -> bool:
         return self.path.name.lower() == "readme.md"
 
     @classmethod
-    def load(cls, path: Path, name: str, *, default_status: str = "") -> "Plan":
+    def load(cls, path: Path, name: str, *, default_status: str = "", folder_status: str = "") -> "Plan":
         path = Path(path)
         text = path.read_text(encoding="utf-8-sig")
         meta, body, had_fm = parse_frontmatter(text, typed=True)
@@ -199,15 +206,11 @@ class Plan:
         for k, v in legacy.items():
             if v and not meta.get(k):
                 meta[k] = v
-        if not meta.get("name"):
-            meta["name"] = name
-        if not meta.get("status") and default_status:
+        if not folder_status and not meta.get("status") and default_status:
             meta["status"] = default_status
-        if not meta.get("title"):
-            for line in cleaned_lines:
-                if line.startswith("# "):
-                    meta["title"] = line[2:].strip()
-                    break
+        # The title is the `# ` heading; frontmatter holds one only for a plan that has no heading.
+        if any(line.startswith("# ") for line in cleaned_lines):
+            meta.pop("title", None)
         if had_fm:
             # Keep body lines clean without duplicate legacy fields
             body_lines = cleaned_lines
@@ -219,23 +222,23 @@ class Plan:
                 if "reviews" in item.relative_to(path.parent).parts:
                     continue
                 extras.append(item)
-        return cls(path, body_lines, name, meta=meta, extras=extras)
+        return cls(path, body_lines, name, meta=meta, extras=extras, folder_status=folder_status)
 
     def render(self) -> str:
         meta = dict(self.meta)
-        meta.setdefault("name", self.name)
-        meta.setdefault("title", self.title)
-        if self.status:
+        meta.pop("name", None)
+        if self.folder_status:
+            meta.pop("status", None)
+        elif self.status:
             meta["status"] = self.status
         _, cleaned = _split_legacy_head_fields(self.lines)
+        if any(line.startswith("# ") for line in cleaned):
+            meta.pop("title", None)
         body = "\n".join(cleaned).rstrip("\n") + "\n"
         return render_frontmatter(meta, body, key_order=_PLAN_KEY_ORDER)
 
     def save(self) -> None:
         _, self.lines = _split_legacy_head_fields(self.lines)
-        if not self.meta.get("title"):
-            self.meta["title"] = self.title
-        self.meta["name"] = self.name
         write_text_lf(self.path, self.render())
 
     # -- metadata -------------------------------------------------------------
@@ -283,6 +286,8 @@ class Plan:
 
     @property
     def status(self) -> str:
+        if self.folder_status:
+            return self.folder_status
         raw = self.field("status")
         return raw.split()[0].lower() if raw else ""
 
@@ -446,6 +451,7 @@ class Plan:
             root=root,
             extras=self.extras,
             key_order=_PLAN_KEY_ORDER,
+            name=self.name,
         )
 
     def problems(self) -> "list[str]":
@@ -495,7 +501,7 @@ class PlansStore:
         folder = STATUS_DIRS.get(status, status)
         return self.root / folder if folder else self.root
 
-    def _scan_base(self, base: Path, *, default_status: str = "") -> "list[Plan]":
+    def _scan_base(self, base: Path, *, default_status: str = "", folder_status: str = "") -> "list[Plan]":
         if not base.is_dir():
             return []
         found: "list[Plan]" = []
@@ -506,7 +512,7 @@ class PlansStore:
                 if entry.suffix.lower() != ".md" or entry.name.lower() in _NOT_PLANS:
                     continue
                 try:
-                    plan = Plan.load(entry, entry.stem, default_status=default_status)
+                    plan = Plan.load(entry, entry.stem, default_status=default_status, folder_status=folder_status)
                 except UnicodeDecodeError:
                     _LOGGER.warning("skipping %s: not UTF-8", entry)
                     continue
@@ -517,7 +523,7 @@ class PlansStore:
                     for sub in sorted(sub_dir.glob("*.md")):
                         if sub.name.lower() in _NOT_PLANS:
                             continue
-                        found.append(Plan.load(sub, "%s/%s" % (entry.stem, sub.stem), default_status=plan.status))
+                        found.append(Plan.load(sub, "%s/%s" % (entry.stem, sub.stem), default_status=plan.status, folder_status=plan.folder_status))
             elif entry.is_dir():
                 if entry.name in tuple(STATUS_DIRS.values()) or entry.name in ("reviews", "archive"):
                     continue
@@ -525,7 +531,7 @@ class PlansStore:
                 if readme.is_file():
                     pname = entry.name[:-3] if entry.name.endswith(".md") else entry.name
                     try:
-                        plan = Plan.load(readme, pname, default_status=default_status)
+                        plan = Plan.load(readme, pname, default_status=default_status, folder_status=folder_status)
                     except UnicodeDecodeError:
                         _LOGGER.warning("skipping %s: not UTF-8", readme)
                         continue
@@ -533,12 +539,12 @@ class PlansStore:
                     for sub in sorted(entry.glob("*.md")):
                         if sub.name.lower() in _NOT_PLANS or sub.name.startswith("_"):
                             continue
-                        found.append(Plan.load(sub, "%s/%s" % (pname, sub.stem), default_status=plan.status))
+                        found.append(Plan.load(sub, "%s/%s" % (pname, sub.stem), default_status=plan.status, folder_status=plan.folder_status))
         return found
 
     def _plans_in_status(self, status: str) -> "list[Plan]":
         d = self.status_dir(status)
-        return self._scan_base(d, default_status=status)
+        return self._scan_base(d, default_status=status, folder_status=status)
 
     def live(self) -> "list[Plan]":
         found: "list[Plan]" = []
@@ -620,13 +626,10 @@ class PlansStore:
             if v and not meta.get(k):
                 meta[k] = v
 
-        plan = Plan(path, body_lines, slug, meta=meta)
-        plan.meta["name"] = slug
-        plan.meta["status"] = status
+        plan = Plan(path, body_lines, slug, meta=meta, folder_status=status)
         plan.meta["created"] = _today()
         if title:
             clean_title = " ".join(title.split())
-            plan.meta["title"] = clean_title
             for i, line in enumerate(plan.lines):
                 if line.startswith("# "):
                     plan.lines[i] = "# " + clean_title
@@ -720,10 +723,12 @@ class PlansStore:
         else:
             for key in ("closed", "outcome", "held"):
                 plan.set_field(key, None)
-        plan.set_field("status", status)
+        plan.set_field("status", None)
         plan.meta["updated"] = _today()
         plan.save()
         self._move(plan, STATUS_DIRS[status])
+        plan.folder_status = status
+        plan.save()
         return plan
 
     def _move(self, plan: Plan, folder: str) -> None:
@@ -805,8 +810,9 @@ class PlansStore:
         top_plans = [p for p in self.all() if "/" not in p.name]
         for plan in top_plans:
             st = plan.status if plan.status in STATUS_DIRS else "draft"
-            if plan.meta.get("status") != st:
-                plan.meta["status"] = st
+            # From here the folder says the status, so the frontmatter stops saying it.
+            plan.folder_status = st
+            plan.meta.pop("status", None)
             before = plan.path.read_text(encoding="utf-8-sig")
             # Promote legacy `<name>.md` + `<name>/` directory into `<name>/README.md`
             sub_dir = plan.path.with_suffix("")

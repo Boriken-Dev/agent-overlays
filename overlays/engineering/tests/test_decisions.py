@@ -112,3 +112,18 @@ def test_migrate_legacy_flat_decisions_and_remove_index(tmp_path):
     assert store.require(_D2).meta["amended_by"] == _D3
     assert store.require(_D3).meta["superseded_by"] == _D2
     assert store.provider_info(tmp_path)["kind"] == "markdown"
+
+
+def test_id_name_title_and_status_are_not_repeated_in_the_frontmatter(tmp_path):
+    store = _dec.DecisionsStore(tmp_path / "decisions")
+    made = store.add("Names live in files", description="One place per field")
+    head = made.path.read_text(encoding="utf-8").split("---")[1]
+    for key in ("id:", "name:", "title:", "status:"):
+        assert key not in head, key
+    again = store.require(made.name)
+    assert (again.id, again.status, again.title) == (made.id, "decided", "Names live in files")
+    later = store.add("Names and status live in paths")
+    store.set_status(made.name, "superseded", by=later.id)
+    moved = store.require(made.name)
+    assert moved.status == "superseded" and moved.path.parent.name == "superseded"
+    assert "status:" not in moved.path.read_text(encoding="utf-8").split("---")[1]

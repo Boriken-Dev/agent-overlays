@@ -50,7 +50,10 @@ def test_add_writes_frontmatter_in_draft_folder_and_no_index(store):
     raw = made.path.read_bytes().decode("utf-8")
     assert "\r" not in raw
     assert raw.startswith("---\n")
-    assert "status: draft" in raw
+    # The folder says the status, the file name the name and the heading the title: the frontmatter repeats none.
+    head = raw.split("---\n")[1]
+    assert "status:" not in head and "name:" not in head and "title:" not in head
+    assert made.status == "draft"
     assert "priority: high" in raw
     assert "# Relay support\n" in raw
     assert "<!--" not in raw
@@ -194,7 +197,9 @@ def test_sql_query_set_edit_and_migrate_legacy(store):
     assert not (store.root / "INDEX.md").exists()
     migrated = store.require("legacy_plan")
     assert migrated.path == store.root / "ready" / "legacy_plan.md"
-    assert migrated.meta["status"] == "ready"
+    assert migrated.status == "ready"
+    assert "status" not in migrated.meta
+    assert "status:" not in migrated.path.read_text(encoding="utf-8").split("---\n")[1]
     assert migrated.meta["executor"] == "code-executor/implemented"
 
     store.set_attrs("legacy_plan", {"priority": "high"})

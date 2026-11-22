@@ -142,3 +142,25 @@ def test_records_cli_subcommands(tmp_path, capsys):
     capsys.readouterr()
     assert (folder / "processed" / "item-one.md").is_file()
     assert not (folder / "item-one.md").exists()
+
+
+def test_name_and_status_live_in_the_path_not_the_frontmatter(tmp_path):
+    store = _records.FolderStore(
+        tmp_path / "findings",
+        status_folders={"active": "active", "processed": "processed"},
+        default_status="active",
+    )
+    rec = store.add("Slow start", meta={"severity": "low"}, body="Context.\n")
+    head = rec.path.read_text(encoding="utf-8").split("---")[1]
+    assert "name:" not in head and "status:" not in head
+    assert (rec.name, rec.status) == ("slow-start", "active")
+    moved = store.move("slow-start", "processed")
+    head = moved.path.read_text(encoding="utf-8").split("---")[1]
+    assert "status:" not in head
+    assert store.require("slow-start").status == "processed"
+    # A file someone wrote with the old fields loses them on its next save.
+    legacy = tmp_path / "findings" / "active" / "old.md"
+    legacy.write_text("---\nname: old\nstatus: active\nseverity: high\n---\n\nBody.\n", encoding="utf-8")
+    store.set_attrs("old", {"severity": "medium"})
+    head = legacy.read_text(encoding="utf-8").split("---")[1]
+    assert "name:" not in head and "status:" not in head and "severity: medium" in head

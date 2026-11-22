@@ -317,13 +317,23 @@ class Record:
         root: Optional[Path] = None,
         extras: "Optional[list[Path]]" = None,
         key_order: "tuple[str, ...]" = (),
+        status_folders: "Optional[dict[str, str]]" = None,
+        name: Optional[str] = None,
     ):
         self.path = Path(path)
+        # A caller that names records differently from their files (a sub-plan, `parent/sub`) passes the name.
+        self._name = name
         self.meta = dict(meta)
         self.body = body
         self.root = Path(root) if root else None
         self.extras = list(extras) if extras else []
         self.key_order = key_order
+        self.status_folders = dict(status_folders) if status_folders else None
+        # The name is the file's (or a complex record's folder's) and the status the folder it sits in: neither is
+        # kept in the frontmatter, so there is one place to change each.
+        self.meta.pop("name", None)
+        if self.status_folders:
+            self.meta.pop("status", None)
 
     @property
     def is_complex(self) -> bool:
@@ -337,8 +347,8 @@ class Record:
 
     @property
     def name(self) -> str:
-        if self.meta.get("name"):
-            return str(self.meta["name"])
+        if self._name:
+            return self._name
         if self.is_complex:
             parent_name = self.path.parent.name
             return parent_name[:-3] if parent_name.endswith(".md") else parent_name
@@ -346,6 +356,13 @@ class Record:
 
     @property
     def status(self) -> str:
+        if self.status_folders:
+            folder = (self.path.parent.parent if self.is_complex else self.path.parent).name
+            for status, status_folder in self.status_folders.items():
+                if status_folder and status_folder == folder:
+                    return status
+            # A record at the store's root is in the status whose folder is the root itself, if any.
+            return next((s for s, f in self.status_folders.items() if not f), "")
         return str(self.meta.get("status", ""))
 
     @property
@@ -391,17 +408,6 @@ class Record:
         text = path.read_text(encoding="utf-8-sig")
         meta, body, _ = parse_frontmatter(text, typed=typed)
         is_complex = path.name.lower() == "readme.md"
-        if not meta.get("name"):
-            if is_complex:
-                p_name = path.parent.name
-                meta["name"] = p_name[:-3] if p_name.endswith(".md") else p_name
-            else:
-                meta["name"] = path.stem
-        if not meta.get("status") and status_folders:
-            folder_to_status = {v: k for k, v in status_folders.items()}
-            check_dir = path.parent.parent if is_complex else path.parent
-            if check_dir.name in folder_to_status:
-                meta["status"] = folder_to_status[check_dir.name]
         extras: "list[Path]" = []
         if is_complex:
             for item in sorted(path.parent.rglob("*.md")):
@@ -410,7 +416,7 @@ class Record:
                 if any(part in _NON_RECORD_DIRS for part in item.relative_to(path.parent).parts):
                     continue
                 extras.append(item)
-        return cls(path, meta, body, root=root, extras=extras, key_order=key_order)
+        return cls(path, meta, body, root=root, extras=extras, key_order=key_order, status_folders=status_folders)
 
     def render(self) -> str:
         return render_frontmatter(self.meta, self.body, key_order=self.key_order)
@@ -770,14 +776,14 @@ class FolderStore:
         if self.get(slug):
             raise fail("record %r already exists under %s" % (slug, self.root))
         st = status or self.default_status
-        rec_meta: "dict[str, Any]" = {"name": slug, "status": st, "created": today_iso()}
+        rec_meta: "dict[str, Any]" = {"created": today_iso()}
         if meta:
             rec_meta.update(meta)
-        rec_meta["name"] = slug
-        rec_meta["status"] = st
+        if not self.status_folders and st:
+            rec_meta["status"] = st
         dest_dir = self.status_dir(st)
         path = (dest_dir / slug / "README.md") if complex_dir else (dest_dir / (slug + ".md"))
-        rec = Record(path, rec_meta, body, root=self.root, key_order=self.key_order)
+        rec = Record(path, rec_meta, body, root=self.root, key_order=self.key_order, status_folders=self.status_folders)
         rec.save()
         return rec
 
@@ -833,7 +839,8 @@ class FolderStore:
     def move(self, name: str, new_status: str) -> Record:
         rec = self.require(name)
         new_status = new_status.strip().lower()
-        rec.meta["status"] = new_status
+        if not self.status_folders:
+            rec.meta["status"] = new_status
         rec.meta["updated"] = today_iso()
         rec.save()
         dest_dir = self.status_dir(new_status)

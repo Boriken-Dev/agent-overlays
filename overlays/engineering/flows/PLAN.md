@@ -11,8 +11,9 @@ deviation triggers, and never defer a question to execution.
 2. **No implementation**: paths, signatures, hints, a one-line *Why*, and code
    blocks of at most five lines. Commands are complete literals, environment setup
    included; verify undocumented third-party behaviour against the real system.
-3. **Required shape**: YAML frontmatter (`name`, `title`, `status`, `executor`, plus
-   optional attributes like `priority`, `tags`, `links`, `depends_on`), followed by
+3. **Required shape**: YAML frontmatter (`executor`, plus optional attributes like
+   `priority`, `tags`, `links`, `depends_on`; never `name`, `status` or `title`: the
+   file name is the name, the folder the status, the `# ` heading the title), followed by
    `# <Title>`, `## Progress`, `## Known Facts & Context`, `## Phases` (files,
    guidance, Why, observable done-when), `## Verification`, `## Reporting`.
 4. **Right-sized**: split above ~150 lines or for independently executable phases
@@ -52,7 +53,7 @@ Plans live in `<project>/.agents/plans/<status>/`:
 
 Complex plans replace `<name>.md` with a directory `<name>/README.md` +
 `<phases|extras>.md`. No `INDEX.md` is kept. `plans status <name> <status>`
-updates the frontmatter `status` and moves the file or directory into its folder
+moves the file or directory into its folder, which is the status
 (`done` requires every phase checked and `-m` evidence; `on-hold` requires `-m`
 reason). Other storage backends (`github`, `gitlab`, `jira`, `ai6`) can be wired
 via `.agents/records.toml` (`plans providers`).

@@ -178,8 +178,19 @@ class Decision:
 
     @property
     def status(self) -> str:
+        if self.folder_status in STATUS_DIRS:
+            return self.folder_status
         raw = str(self.meta.get("status") or self.folder_status or "decided").strip().lower()
         return _STATUS_ALIASES.get(raw, raw)
+
+    def _derived(self) -> "dict[str, bool]":
+        """Which fields the path or the body already says, so the frontmatter must not repeat them."""
+        return {
+            "name": True,
+            "id": bool(_ID_RE.match(self.name)),
+            "title": bool(_HEADING_ID_RE.search(self.body)),
+            "status": self.folder_status in STATUS_DIRS,
+        }
 
     @property
     def title(self) -> str:
@@ -206,17 +217,16 @@ class Decision:
         raw = path.read_text(encoding="utf-8-sig")
         meta, body, _ = parse_frontmatter(raw, typed=True)
         stem = name or (path.parent.name if is_complex else path.stem)
-        did = str(meta.get("id") or _extract_id(stem, body)).strip()
-        if did:
-            meta.setdefault("id", did.upper())
-        meta.setdefault("name", stem)
+        meta.pop("name", None)
         title = _extract_title(stem, body)
-        meta.setdefault("title", title)
-        st = meta.get("status")
-        if isinstance(st, str) and st.strip():
-            meta["status"] = _STATUS_ALIASES.get(st.strip().lower(), st.strip().lower())
+        if folder_status in STATUS_DIRS:
+            meta.pop("status", None)
         else:
-            meta["status"] = _infer_legacy_status(body, folder_status, index_hint=index_hint)
+            st = meta.get("status")
+            if isinstance(st, str) and st.strip():
+                meta["status"] = _STATUS_ALIASES.get(st.strip().lower(), st.strip().lower())
+            else:
+                meta["status"] = _infer_legacy_status(body, folder_status, index_hint=index_hint)
         desc = _extract_description(meta, body, title)
         if desc:
             meta.setdefault("description", desc)
@@ -227,7 +237,7 @@ class Decision:
             meta["updated"] = str(meta["created"])
         if "superseded_by" not in meta:
             sm = _SUPERSEDED_BY_RE.search(body[:1500])
-            if sm and meta["status"] == "superseded":
+            if sm and (folder_status or meta.get("status")) == "superseded":
                 meta["superseded_by"] = sm.group(1).upper()
         if "amended_by" not in meta:
             am = _AMENDED_BY_RE.search(body[:1500])
@@ -244,10 +254,16 @@ class Decision:
         )
 
     def render(self) -> str:
-        self.meta["name"] = self.name
-        if self.id and "id" not in self.meta:
-            self.meta["id"] = self.id
-        return render_frontmatter(self.meta, self.body.lstrip("\n"), key_order=_DECISION_KEY_ORDER)
+        meta = dict(self.meta)
+        derived = self._derived()
+        for key, said in derived.items():
+            if said:
+                meta.pop(key, None)
+        if not derived["id"] and self.id and "id" not in meta:
+            meta["id"] = self.id
+        if not derived["title"]:
+            meta.setdefault("title", self.title)
+        return render_frontmatter(meta, self.body.lstrip("\n"), key_order=_DECISION_KEY_ORDER)
 
     def save(self) -> None:
         write_text_lf(self.path, self.render())
@@ -464,7 +480,9 @@ class DecisionsStore:
         dec = self.require(key)
         for k, v in updates.items():
             if k == "status":
-                dec.meta["status"] = normalize_status(str(v))
+                # The status is the folder: changing it moves the decision.
+                self.set_status(dec.name, str(v))
+                dec = self.require(dec.name)
             else:
                 dec.meta[k] = v
         for k in unset:
@@ -558,7 +576,6 @@ class DecisionsStore:
         norm = normalize_status(new_status)
         if norm == "superseded" and not (by.strip() or dec.meta.get("superseded_by")):
             raise fail("superseding a decision requires --by <Dnn> naming its replacement")
-        dec.meta["status"] = norm
         dec.meta["updated"] = today_iso()
         if by.strip():
             dec.meta["superseded_by"] = by.strip().upper()
@@ -575,6 +592,8 @@ class DecisionsStore:
             )
         dec.save()
         self._move_to_status(dec, norm)
+        dec.meta.pop("status", None)
+        dec.save()
         return dec
 
     def remove(self, key: str, *, force: bool = False) -> Path:
@@ -608,11 +627,12 @@ class DecisionsStore:
         recs = [
             _rec.Record(
                 d.path,
-                d.meta,
+                dict(d.meta, id=d.id, title=d.title, status=d.status),
                 d.body,
                 root=self.root,
                 extras=list(d.extras),
                 key_order=_DECISION_KEY_ORDER,
+                name=d.name,
             )
             for d in self.all()
         ]
@@ -633,7 +653,8 @@ class DecisionsStore:
         removed_index = False
         for dec in self.all():
             norm = normalize_status(dec.status)
-            dec.meta["status"] = norm
+            dec.folder_status = norm
+            dec.meta.pop("status", None)
             before = dec.path.read_text(encoding="utf-8-sig")
             dest_dir = self.status_dir(norm)
             target_path = (dest_dir / dec.name / "README.md") if dec.is_complex else (dest_dir / dec.path.name)

@@ -97,14 +97,17 @@ from the first `## ` heading down is documentation and is not merged.
   pass.
 - **Plans**: always `<project>/.agents/plans/<status>/<name>.md` (or
   `<status>/<name>/README.md` + `<phase|extra>.md` for complex plans), snake_case,
-  with YAML frontmatter for fields/attributes and context after frontmatter; no
+  with YAML frontmatter for fields/attributes and context after frontmatter (the
+  file name is the name, the folder the status, the `# ` heading the title, so the
+  frontmatter repeats none of them); no
   `INDEX.md`. Create, query, step, edit and move them with `plans`
   (`add`, `list`, `query`, `next`, `start`, `check`, `set`, `edit`, `status`, `rm`),
   or any folder with `records`, as each step happens, not at the end.
   **`~/.agents/plans/` is never a plan home**: re-home harness drafts into the
   project and delete the copy.
 - **Decisions**: `<project>/.agents/decisions/<status>/<Dnn_slug>.md` (`proposed`,
-  `decided`, `superseded`) with YAML frontmatter and context after frontmatter;
+  `decided`, `superseded`) with YAML frontmatter and context after frontmatter (id,
+  name and title come from the file name and heading, status from the folder);
   no `INDEX.md`. Settled decisions are superseded (`decisions supersede`),
   never deleted.
 

@@ -1,7 +1,4 @@
 ---
-name: <name>
-title: <Plan Title>
-status: draft
 executor: "<family/subrole from MODELS.md> — <one line: why this role>"
 ---
 
