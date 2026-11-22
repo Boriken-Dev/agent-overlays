@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   such as `CLAUDE.md`, `GEMINI.md` or `.cursorrules` (with where its text goes), a misnamed `agents.md`, and a `.agents` folder or
   `AGENTS.local.md` that a commit would hold. `--allow` leaves out a path the project keeps on purpose. `flows/REPO.md` states the
   standard.
+- engineering: `records` can keep a folder's records in GitHub issues or pull requests instead of Markdown files
+  (`.agents/records.toml`, `provider = "github"`): the issue number is the record's name, a `status:<status>` label its status,
+  and the other frontmatter fields a block at the top of the issue's text. It runs through the person's own `gh` login.
 - engineering: `lib/python/agent_tools.py`, the reader of the two agent-tools files (`<project>/.agents/agent-tools.toml`, the
   machine's `agent-tools.local.toml`; unknown keys refused with file and key) and the one commit-message rule: no
   `Co-Authored-By:` naming a model or an assistant, no `*-Session:` trailer, no session URL, no "Generated with" footer.
