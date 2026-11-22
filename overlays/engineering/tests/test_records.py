@@ -112,14 +112,15 @@ def test_provider_config_resolution(tmp_path):
     assert prov.kind == "markdown"
 
     (agents / "records.toml").write_text(
-        '[plans]\nprovider = "github"\nrepo = "Boriken-Dev/canoa"\n',
+        '[plans]\nprovider = "github"\nrepo = "Boriken-Dev/canoa"\n[findings]\nprovider = "ai6"\noperation = "x"\n',
         encoding="utf-8",
     )
     gh = _records.open_provider(store, agents, scope_key="plans")
     assert gh.kind == "github"
     assert gh.capabilities()["configured"] is True
-    with pytest.raises(SystemExit, match="external provider 'github'"):
-        gh.list_records()
+    ai6 = _records.open_provider(store, agents, scope_key="findings")
+    with pytest.raises(SystemExit, match="external provider 'ai6'"):
+        ai6.list_records()
 
 
 def test_records_cli_subcommands(tmp_path, capsys):

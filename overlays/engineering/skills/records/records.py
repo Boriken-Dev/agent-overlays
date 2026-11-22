@@ -51,6 +51,8 @@ coerce_attr_value = _rec.coerce_attr_value
 fail = _rec.fail
 format_query_result = _rec.format_query_result
 open_provider = _rec.open_provider
+load_provider_settings = _rec.load_provider_settings
+ProviderStore = _rec.ProviderStore
 
 
 def _out(text: str) -> None:
@@ -85,6 +87,15 @@ class Records(LoggingArgs, Cli):
         ("folder",)
 
         def store(self) -> Any:
+            """The folder's store, or the tracker's when `records.toml` names a provider for this folder."""
+            local = self.folder_store()
+            agents_root = self.resolve_scope().agents_root if hasattr(self, "resolve_scope") else local.root.parent
+            key = Path(self.folder).name
+            if str(load_provider_settings(agents_root, key).get("provider", "markdown")).lower() != "markdown":
+                return ProviderStore(open_provider(local, agents_root, scope_key=key))
+            return local
+
+        def folder_store(self) -> Any:
             target = Path(self.folder).expanduser()
             if not target.is_absolute() and not target.exists():
                 if hasattr(self, "resolve_scope"):
@@ -353,7 +364,7 @@ class Records(LoggingArgs, Cli):
         ("--scope",)
 
         def __call__(self) -> int:
-            store = self.store()
+            store = self.folder_store()
             agents_root = self.resolve_scope().agents_root if hasattr(self, "resolve_scope") else store.root.parent
             prov = open_provider(store, agents_root, scope_key=self.scope_key)
             _out(json.dumps(prov.capabilities(), indent=2) + "\n")

@@ -14,6 +14,7 @@ Standard library only; Python 3.9 or later.
 
 from __future__ import annotations
 
+import base64
 import datetime
 import json
 import logging
@@ -21,7 +22,11 @@ import os
 import re
 import shutil
 import sqlite3
+import subprocess
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Optional
@@ -656,6 +661,33 @@ def format_query_result(
 # --------------------------------------------------------------------------- #
 
 
+def apply_body_edit(
+    rec: Record,
+    *,
+    body: Optional[str] = None,
+    section: Optional[str] = None,
+    append: Optional[str] = None,
+    replace: "Optional[tuple[str, str]]" = None,
+) -> None:
+    """Change ``rec.body`` in memory: replace it, or append to / replace text in it or one of its sections."""
+    if body is not None:
+        rec.body = body
+    elif section and append is not None:
+        rec.append_to_section(section, append)
+    elif section and replace is not None:
+        sec_text = rec.section_text(section)
+        old, new = replace
+        if old not in sec_text:
+            raise fail("%s: %r not found in section %r" % (rec.name, old, section))
+        rec.set_section(section, sec_text.split("\n", 1)[1].replace(old, new))
+    elif append is not None:
+        rec.body = rec.body.rstrip("\r\n") + "\n\n" + append.strip("\r\n") + "\n"
+    elif replace is not None:
+        rec.replace_in_body(replace[0], replace[1])
+    else:
+        raise fail("pass --body, --append, or --replace")
+
+
 class FolderStore:
     """Markdown+frontmatter store for any folder (flat or status-folder layout)."""
 
@@ -816,22 +848,7 @@ class FolderStore:
         replace: "Optional[tuple[str, str]]" = None,
     ) -> Record:
         rec = self.require(name)
-        if body is not None:
-            rec.body = body
-        elif section and append is not None:
-            rec.append_to_section(section, append)
-        elif section and replace is not None:
-            sec_text = rec.section_text(section)
-            old, new = replace
-            if old not in sec_text:
-                raise fail("%s: %r not found in section %r" % (rec.name, old, section))
-            rec.set_section(section, sec_text.split("\n", 1)[1].replace(old, new))
-        elif append is not None:
-            rec.body = rec.body.rstrip("\r\n") + "\n\n" + append.strip("\r\n") + "\n"
-        elif replace is not None:
-            rec.replace_in_body(replace[0], replace[1])
-        else:
-            raise fail("pass --body, --append, or --replace")
+        apply_body_edit(rec, body=body, section=section, append=append, replace=replace)
         rec.meta["updated"] = today_iso()
         rec.save()
         return rec
@@ -1021,10 +1038,34 @@ class MarkdownProvider(RecordProvider):
         return str(self.store.remove(name, force=force))
 
 
+# --------------------------------------------------------------------------- #
+# External trackers: the issue's key is the record's name, its status a label or a workflow state.
+# Neither is repeated in the issue's text; the other frontmatter fields ride in a block at the top of its body.
+# --------------------------------------------------------------------------- #
+
+# Fields the tracker itself holds (title, state, dates, address): never written into the body block.
+_TRACKER_FIELDS = frozenset(("name", "status", "title", "url", "created", "updated", "number", "path", "folder"))
+
+
+def _words(value: Any) -> "list[str]":
+    if isinstance(value, str):
+        return [w.strip().lower() for w in value.split(",") if w.strip()]
+    return [str(w).strip().lower() for w in (value or []) if str(w).strip()]
+
+
 class ExternalTrackerProvider(RecordProvider):
-    """Base adapter for remote issue/MR/report providers (GitHub, GitLab, Jira, AI6)."""
+    """Adapter for a remote issue tracker (GitHub, GitLab, Jira, AI6).
+
+    A subclass that talks to its tracker sets ``wired`` and implements the ``_items``/``_item``/``_make``/``_edit``/
+    ``_transition``/``_remove`` hooks, which exchange issues as dicts with ``key``, ``title``, ``body``, ``status``,
+    ``created``, ``updated`` and ``url``. Credentials are the person's own CLI login or a named environment variable.
+    """
 
     required_keys: "tuple[str, ...]" = ()
+    wired = False
+    # What opens and closes the block of frontmatter fields at the top of an issue's body.
+    block_open = "<!-- records"
+    block_close = "-->"
 
     def __init__(self, kind: str, config: "Optional[dict[str, Any]]" = None):
         self.kind = kind
@@ -1042,6 +1083,7 @@ class ExternalTrackerProvider(RecordProvider):
         return {
             "kind": self.kind,
             "configured": all(bool(self.config.get(k)) for k in self.required_keys),
+            "wired": self.wired,
             "required_keys": list(self.required_keys),
             "config": self.config,
         }
@@ -1053,33 +1095,294 @@ class ExternalTrackerProvider(RecordProvider):
             % (self.kind, self.config.get("repo") or self.config.get("project") or self.config.get("url") or "", op)
         )
 
-    def list_records(self, *, status: Optional[str] = None) -> "list[dict[str, Any]]":
-        return self._not_wired("list")
+    def _ready(self, op: str) -> None:
+        if not self.wired:
+            self._not_wired(op)
+        self._require_configured()
 
-    def query(self, **kwargs: Any) -> "tuple[list[str], list[dict[str, Any]]]":
-        return self._not_wired("query")
+    # ---- configuration ---------------------------------------------------
+
+    @property
+    def default_status(self) -> str:
+        return str(self.config.get("default_status") or "active").lower()
+
+    @property
+    def closed_statuses(self) -> "list[str]":
+        return _words(self.config.get("closed_statuses")) or ["done", "processed"]
+
+    @property
+    def label(self) -> str:
+        return str(self.config.get("repo") or self.config.get("project") or self.kind)
+
+    def _norm_key(self, name: str) -> str:
+        return str(name).strip().lstrip("#")
+
+    # ---- the body block ---------------------------------------------------
+
+    def _decode(self, text: str) -> "tuple[dict[str, Any], str]":
+        text = (text or "").replace("\r\n", "\n")
+        head = self.block_open + "\n"
+        if not text.startswith(head):
+            return {}, text
+        end = text.find("\n" + self.block_close, len(head) - 1)
+        if end < 0:
+            return {}, text
+        meta, _, _ = parse_frontmatter("---\n" + text[len(head):end] + "\n---\n", typed=True)
+        return meta, text[end + 1 + len(self.block_close):].lstrip("\n")
+
+    def _encode(self, meta: "dict[str, Any]", body: str) -> str:
+        fields = {k: v for k, v in meta.items() if k not in _TRACKER_FIELDS}
+        body = (body or "").strip("\r\n")
+        if not any(v not in (None, "", []) for v in fields.values()):
+            return body + "\n" if body else ""
+        block = render_frontmatter(fields, "").split("\n", 1)[1].rsplit("---", 1)[0].rstrip("\n")
+        return "%s\n%s\n%s\n\n%s" % (self.block_open, block, self.block_close, body + "\n" if body else "")
+
+    def _record(self, item: "dict[str, Any]") -> Record:
+        meta, body = self._decode(str(item.get("body") or ""))
+        meta.update(
+            title=item.get("title") or "",
+            status=item.get("status") or "",
+            created=item.get("created") or "",
+            updated=item.get("updated") or "",
+            url=item.get("url") or "",
+        )
+        return Record(Path(self.label) / str(item["key"]), meta, body, name=str(item["key"]))
+
+    @staticmethod
+    def _as_dict(rec: Record, *, include_body: bool) -> "dict[str, Any]":
+        out = rec.as_dict(include_body=include_body)
+        out["path"] = rec.meta.get("url") or out["path"]
+        out["folder"] = ""
+        return out
+
+    # ---- hooks a wired provider implements ---------------------------------
+
+    def _items(self) -> "list[dict[str, Any]]":
+        raise NotImplementedError
+
+    def _item(self, key: str) -> "dict[str, Any]":
+        raise NotImplementedError
+
+    def _make(self, title: str, body: str, status: str) -> str:
+        raise NotImplementedError
+
+    def _edit(self, item: "dict[str, Any]", title: str, body: str) -> None:
+        raise NotImplementedError
+
+    def _transition(self, item: "dict[str, Any]", new_status: str) -> None:
+        raise NotImplementedError
+
+    def _remove(self, item: "dict[str, Any]") -> None:
+        raise NotImplementedError
+
+    # ---- the provider interface --------------------------------------------
+
+    def records(self) -> "list[Record]":
+        self._ready("list")
+        return [self._record(i) for i in self._items()]
+
+    def record(self, name: str) -> Record:
+        self._ready("get")
+        return self._record(self._item(self._norm_key(name)))
+
+    def list_records(self, *, status: Optional[str] = None) -> "list[dict[str, Any]]":
+        recs = self.records()
+        if status:
+            recs = [r for r in recs if r.status == status.lower()]
+        return [self._as_dict(r, include_body=False) for r in recs]
+
+    def query(
+        self,
+        *,
+        sql: Optional[str] = None,
+        select: Optional[str] = None,
+        where: Optional[str] = None,
+        order_by: Optional[str] = None,
+        group_by: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> "tuple[list[str], list[dict[str, Any]]]":
+        return query_records(
+            self.records(), sql=sql, select=select, where=where, order_by=order_by, group_by=group_by, limit=limit
+        )
 
     def get(self, name: str) -> "dict[str, Any]":
-        return self._not_wired("get")
+        return self._as_dict(self.record(name), include_body=True)
 
     def create(self, name: str, *, meta: "Optional[dict[str, Any]]" = None, body: str = "") -> "dict[str, Any]":
-        return self._not_wired("create")
+        """Open an issue titled ``meta['title']`` or else ``name``; the tracker names the record (its key)."""
+        self._ready("create")
+        fields = dict(meta or {})
+        title = str(fields.pop("title", "") or name)
+        status = str(fields.pop("status", "") or self.default_status).lower()
+        key = self._make(title, self._encode(fields, body), status)
+        return self.get(key)
 
     def update(self, name: str, *, meta: "Optional[dict[str, Any]]" = None, body: Optional[str] = None) -> "dict[str, Any]":
-        return self._not_wired("update")
+        """Merge ``meta`` (``None`` removes a field; ``title`` and ``status`` go to the tracker) and replace the body."""
+        self._ready("update")
+        item = self._item(self._norm_key(name))
+        fields, old_body = self._decode(str(item.get("body") or ""))
+        title = str(item.get("title") or "")
+        new_status = None
+        for k, v in (meta or {}).items():
+            if k == "title" and v:
+                title = str(v)
+            elif k == "status":
+                new_status = str(v).lower() if v else None
+            elif k in _TRACKER_FIELDS:
+                continue
+            elif v is None:
+                fields.pop(k, None)
+            else:
+                fields[k] = v
+        self._edit(item, title, self._encode(fields, old_body if body is None else body))
+        if new_status and new_status != item.get("status"):
+            self._transition(item, new_status)
+        return self.get(item["key"])
 
     def move(self, name: str, new_status: str) -> "dict[str, Any]":
-        return self._not_wired("move")
+        self._ready("move")
+        item = self._item(self._norm_key(name))
+        new_status = new_status.strip().lower()
+        if item.get("status") != new_status:
+            self._transition(item, new_status)
+        return self._as_dict(self.record(item["key"]), include_body=False)
 
     def delete(self, name: str, *, force: bool = False) -> str:
-        return self._not_wired("delete")
+        self._ready("delete")
+        item = self._item(self._norm_key(name))
+        if item.get("status") in self.closed_statuses and not force:
+            raise fail("%s has status %r; pass --force to remove" % (item["key"], item.get("status")))
+        self._remove(item)
+        return "%s/%s" % (self.label, item["key"])
 
 
-class GitHubProvider(ExternalTrackerProvider):
+def _cli_command(config: "dict[str, Any]", default: str, hint: str) -> "list[str]":
+    """The program to run: ``command`` from the configuration (a string or an argument list), else ``default`` on PATH."""
+    given = config.get("command")
+    if given:
+        return [str(a) for a in given] if isinstance(given, (list, tuple)) else [str(given)]
+    found = shutil.which(default)
+    if not found:
+        raise fail("%r is not on PATH: %s" % (default, hint))
+    return [found]
+
+
+def _run_cli(argv: "list[str]", *, stdin: Optional[str] = None) -> str:
+    try:
+        done = subprocess.run(
+            argv, input=stdin, capture_output=True, text=True, encoding="utf-8", timeout=120, check=False
+        )
+    except FileNotFoundError:
+        raise fail("cannot run %r" % (argv[0],))
+    except subprocess.TimeoutExpired:
+        raise fail("%s timed out" % " ".join(argv[:3]))
+    if done.returncode != 0:
+        detail = (done.stderr or done.stdout or "").strip().splitlines()
+        raise fail("%s failed (exit %d): %s" % (" ".join(argv[:3]), done.returncode, detail[-1] if detail else "no output"))
+    return done.stdout
+
+
+class _LabelStatusProvider(ExternalTrackerProvider):
+    """Status as one ``<status_prefix><status>`` label; a closed status also closes the issue."""
+
+    @property
+    def status_prefix(self) -> str:
+        return str(self.config.get("status_prefix") or "status:")
+
+    def _status_of(self, labels: "list[str]", closed: bool) -> str:
+        for label in labels:
+            if label.lower().startswith(self.status_prefix.lower()):
+                return label[len(self.status_prefix):].strip().lower()
+        return self.closed_statuses[0] if closed else self.default_status
+
+    def _status_labels(self, item: "dict[str, Any]") -> "list[str]":
+        return [l for l in item.get("labels", []) if l.lower().startswith(self.status_prefix.lower())]
+
+
+class GitHubProvider(_LabelStatusProvider):
+    """GitHub issues (or pull requests, ``kind = "pr"``) through the person's logged-in ``gh``."""
+
     required_keys = ("repo",)
+    wired = True
+    _FIELDS = "number,title,body,labels,state,createdAt,updatedAt,url"
 
     def __init__(self, config: "Optional[dict[str, Any]]" = None):
         super().__init__("github", config)
+
+    @property
+    def _noun(self) -> str:
+        return "pr" if str(self.config.get("kind") or "issue").lower() in ("pr", "pull_request") else "issue"
+
+    def _gh(self, *args: str, stdin: Optional[str] = None) -> str:
+        cmd = _cli_command(self.config, "gh", "install GitHub CLI and run `gh auth login`")
+        return _run_cli(cmd + list(args) + ["--repo", str(self.config["repo"])], stdin=stdin)
+
+    def _normalize(self, raw: "dict[str, Any]") -> "dict[str, Any]":
+        labels = [str(l.get("name", "")) for l in raw.get("labels") or []]
+        closed = str(raw.get("state", "")).upper() != "OPEN"
+        return {
+            "key": str(raw["number"]),
+            "title": raw.get("title") or "",
+            "body": raw.get("body") or "",
+            "labels": labels,
+            "open": not closed,
+            "status": self._status_of(labels, closed),
+            "created": raw.get("createdAt") or "",
+            "updated": raw.get("updatedAt") or "",
+            "url": raw.get("url") or "",
+        }
+
+    def _items(self) -> "list[dict[str, Any]]":
+        out = self._gh(
+            self._noun, "list", "--state", "all", "--limit", str(int(self.config.get("limit") or 1000)),
+            "--json", self._FIELDS,
+        )
+        return [self._normalize(r) for r in json.loads(out or "[]")]
+
+    def _item(self, key: str) -> "dict[str, Any]":
+        if not key.isdigit():
+            raise fail("%r: a GitHub record's name is its number" % (key,))
+        return self._normalize(json.loads(self._gh(self._noun, "view", key, "--json", self._FIELDS)))
+
+    def _ensure_label(self, status: str) -> str:
+        label = self.status_prefix + status
+        self._gh("label", "create", label, "--force")
+        return label
+
+    def _make(self, title: str, body: str, status: str) -> str:
+        if self._noun == "pr":
+            raise fail("a pull request is opened from a branch, not created as a record")
+        label = self._ensure_label(status)
+        url = self._gh("issue", "create", "--title", title, "--body-file", "-", "--label", label, stdin=body).strip()
+        key = url.rstrip("/").rsplit("/", 1)[-1]
+        if not key.isdigit():
+            raise fail("gh did not print the new issue's address: %r" % (url,))
+        if status in self.closed_statuses:
+            self._gh("issue", "close", key)
+        return key
+
+    def _edit(self, item: "dict[str, Any]", title: str, body: str) -> None:
+        self._gh(self._noun, "edit", item["key"], "--title", title, "--body-file", "-", stdin=body)
+
+    def _transition(self, item: "dict[str, Any]", new_status: str) -> None:
+        label = self._ensure_label(new_status)
+        args = [self._noun, "edit", item["key"], "--add-label", label]
+        for old in self._status_labels(item):
+            if old != label:
+                args += ["--remove-label", old]
+        self._gh(*args)
+        closing = new_status in self.closed_statuses
+        if closing and item["open"]:
+            self._gh(self._noun, "close", item["key"])
+        elif not closing and not item["open"]:
+            self._gh(self._noun, "reopen", item["key"])
+
+    def _remove(self, item: "dict[str, Any]") -> None:
+        if self._noun == "pr":
+            raise fail("a pull request cannot be deleted; move it to a closed status")
+        self._gh("issue", "delete", item["key"], "--yes")
 
 
 class GitLabProvider(ExternalTrackerProvider):
@@ -1101,6 +1404,63 @@ class Ai6Provider(ExternalTrackerProvider):
 
     def __init__(self, config: "Optional[dict[str, Any]]" = None):
         super().__init__("ai6", config)
+
+
+class ProviderStore:
+    """The part of :class:`FolderStore` the commands use, over an external provider's records."""
+
+    def __init__(self, provider: "ExternalTrackerProvider"):
+        self.provider = provider
+        self.root = Path(provider.label)
+
+    def all(self) -> "list[Record]":
+        return self.provider.records()
+
+    def require(self, name: str) -> Record:
+        return self.provider.record(name)
+
+    def query(self, **kwargs: Any) -> "tuple[list[str], list[dict[str, Any]]]":
+        return self.provider.query(**kwargs)
+
+    def add(
+        self,
+        name: str,
+        *,
+        meta: "Optional[dict[str, Any]]" = None,
+        body: str = "",
+        status: Optional[str] = None,
+        complex_dir: bool = False,
+    ) -> Record:
+        if complex_dir:
+            raise fail("a tracker's issue is one record: --complex is for folders")
+        fields = dict(meta or {})
+        if status:
+            fields["status"] = status
+        return self.provider.record(self.provider.create(name, meta=fields, body=body)["name"])
+
+    def set_attrs(self, name: str, updates: "dict[str, Any]", *, unset: "Optional[list[str]]" = None) -> Record:
+        fields = {k: None for k in (unset or [])}
+        fields.update(updates)
+        return self.provider.record(self.provider.update(name, meta=fields)["name"])
+
+    def edit_body(
+        self,
+        name: str,
+        *,
+        body: Optional[str] = None,
+        section: Optional[str] = None,
+        append: Optional[str] = None,
+        replace: "Optional[tuple[str, str]]" = None,
+    ) -> Record:
+        rec = self.require(name)
+        apply_body_edit(rec, body=body, section=section, append=append, replace=replace)
+        return self.provider.record(self.provider.update(name, body=rec.body)["name"])
+
+    def move(self, name: str, new_status: str) -> Record:
+        return self.provider.record(self.provider.move(name, new_status)["name"])
+
+    def remove(self, name: str, *, force: bool = False) -> Path:
+        return Path(self.provider.delete(name, force=force))
 
 
 BUILTIN_PROVIDERS: "dict[str, type[ExternalTrackerProvider]]" = {
