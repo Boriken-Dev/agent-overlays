@@ -1,18 +1,15 @@
 """Per-project ``.agents`` linking, and a sync hand-off -- the private-sync overlay's logic.
 
-Moved here from ``dotagents/_link.py``: this is the private-sync workflow's
-logic, not dotagents' core, so it ships with the workflow's commands
-(``../cmds/link_project.py``, ``../cmds/sync_project.py``) in this overlay.
-Plain dotagents installs nothing private-sync.
+The private-sync workflow's logic, used by the ``private-sync`` skill
+(``../../skills/private-sync/private_sync.py``) and the session hooks
+(``../../hooks/run_link.py``). It exists for one workflow -- keeping each
+checkout's private agent state (plans, kb, findings, a user-managed
+``AGENTS.md``) outside the public project repo, in a single place that can be
+carried between machines.
 
-Neither of these is required to use dotagents: ``init`` never touches a
-project directory. They exist for one workflow -- keeping each checkout's private
-agent state (plans, kb, findings, a user-managed ``AGENTS.md``) outside the public
-project repo, in a single place that can be carried between machines.
-
-What dotagents actually does here: point ``<project>/.agents`` at a store, and
-reconcile the copy it made if symlinking wasn't available. Two things around that
-are **conventions, not requirements**:
+It points ``<project>/.agents`` at a store, and reconciles the copy it made if
+symlinking wasn't available. Two things around that are **conventions, not
+requirements**:
 
 - **Where stores live.** ``<agents_dir>/projects/<name>`` is only the default; see
   ``store_root`` (``--store-dir`` / ``AGENTS_STORE_DIR``, absolute paths allowed).
@@ -27,9 +24,9 @@ are **conventions, not requirements**:
 - ``ensure_store_gitignore`` — the default ignore rules of a store kept in git,
   written once by the built-in git path.
 
-Kept out of the command modules (which only wire args to these). **Pure stdlib**
-(``os``/``shutil``/``subprocess``) -- no ``duho``/``pathapi`` -- so the
-command modules can load it by path with no dependency or PYTHONPATH setup.
+Kept out of the skill (which only wires args to these). **Pure stdlib**
+(``os``/``shutil``/``subprocess``) -- no ``duho`` -- so the skill and the hooks
+can load it by path with no dependency or PYTHONPATH setup.
 """
 
 from __future__ import annotations
@@ -43,20 +40,15 @@ from typing import Optional
 
 
 #: Default subdirectory of the agents dir that holds per-project stores. This is
-#: a convention, not a requirement -- dotagents does not care how you file them.
+#: a convention, not a requirement.
 #: Override per-invocation with ``--store-dir`` or ``AGENTS_STORE_DIR`` (which
 #: may be an absolute path, putting the stores outside the agents dir entirely).
 DEFAULT_STORE_SUBDIR = "projects"
 
 
 def default_agents_dir() -> Path:
-    """The user store, read at call time: ``$AGENTS_HOME``, else ``~/.agents``
-    (dotagents' own rule when dotagents is importable)."""
-    try:
-        from dotagents._scope import resolve_user_store
-    except ImportError:  # the lib imported outside a dotagents process
-        return Path(os.environ.get("AGENTS_HOME") or Path.home() / ".agents")
-    return Path(resolve_user_store(None))
+    """The user store, read at call time: ``$AGENTS_HOME``, else ``~/.agents``."""
+    return Path(os.environ.get("AGENTS_HOME") or Path.home() / ".agents")
 
 
 def store_root(agents_dir: Path, store_dir: "str | os.PathLike | None" = None) -> Path:
@@ -555,7 +547,7 @@ def _read_records(agents_dir: Path) -> dict:
         return {}
     try:
         import tomllib  # type: ignore[import-not-found]
-    except ImportError:  # Python < 3.11: dotagents itself depends on tomli there
+    except ImportError:  # Python < 3.11
         import tomli as tomllib  # type: ignore[no-redef]
     with open(path, "rb") as handle:
         data = tomllib.load(handle)
@@ -580,7 +572,7 @@ def write_store_record(agents_dir: Path, name: str, repo: str, branch: str) -> P
     records[name] = {"repo": repo, "branch": branch}
     lines = [
         "# Where each project's .agents store lives, written by",
-        "# `dotagents link-project --store-repo/--store-branch`. `repo` is \"self\"",
+        "# `private-sync link --store-repo/--store-branch`. `repo` is \"self\"",
         "# (the project's own repository), a git URL, or empty for this repository;",
         "# `branch` is the store's branch there.",
         "",
@@ -815,7 +807,7 @@ def ensure_store_gitignore(agents_dir: Path, *, dry_run: bool = False, log=None)
     newline = "\r\n" if "\r\n" in existing else "\n"
     block = [
         STORE_IGNORE_MARK,
-        "# Written once by `dotagents sync-project`. Edit it as you like; keep the",
+        "# Written once by `private-sync sync`. Edit it as you like; keep the",
         "# line above so it is not written again.",
         *STORE_IGNORE_DEFAULTS,
     ]
@@ -878,7 +870,7 @@ def _github_proxy_rewrite_active() -> bool:
 
 def _agents_git_auth(log) -> "tuple[list[str], Optional[dict], Optional[str]]":
     """Authenticate the private agents repo directly against github.com when
-    ``DOTAGENTS_AGENTS_TOKEN`` is set, so a standalone ``dotagents sync-project`` reaches
+    ``DOTAGENTS_AGENTS_TOKEN`` is set, so a standalone ``private-sync sync`` reaches
     the repo the same way the private-sync Stop hook does (it sources
     ``_agents-git-auth.sh``; a direct CLI run never did, so it 403'd through the
     scoped proxy). Returns ``(config_args, env_overlay, tmp_cfg_path)``:
@@ -966,7 +958,7 @@ def _find_sync_hook(agents_dir: Path) -> "Path | None":
 def _run_sync_hook(agents_dir: Path, *, message: str, dry_run: bool, log) -> "int | None":
     """Run ``<agents_dir>/hooks/sync`` if it exists; return its exit code, else None.
 
-    Transport is not dotagents' concern -- git is only the bundled default. A hook
+    Transport is not this tool's concern -- git is only the bundled default. A hook
     lets the store reach other machines however the user wants (or not at all).
     It receives the store path as ``$1`` and the message as ``$2``, plus
     ``AGENTS_HOME`` / ``AGENTS_SYNC_MESSAGE`` in the environment.
@@ -1001,7 +993,7 @@ def _run_sync_hook(agents_dir: Path, *, message: str, dry_run: bool, log) -> "in
 def sync_agents(
     agents_dir,
     *,
-    message: str = "dotagents: sync",
+    message: str = "sync",
     project_dir=None,
     name: Optional[str] = None,
     store_dir: "str | os.PathLike | None" = None,
@@ -1016,7 +1008,7 @@ def sync_agents(
 
     Symlinked projects need no copy-back (their ``.agents`` *is* the store).
 
-    Transport is **not** dotagents' concern. If ``<agents_dir>/hooks/sync`` exists
+    Transport is **not** this tool's concern. If ``<agents_dir>/hooks/sync`` exists
     it owns that step entirely and its exit code is returned. Otherwise the bundled
     git path runs (``pull --rebase`` / commit / push) as a convenient default --
     with ``--remote`` on a non-git ``agents_dir``, ``git init`` + set ``origin``
@@ -1025,7 +1017,7 @@ def sync_agents(
     log = _Log(logger)
     agents_dir = Path(agents_dir).expanduser().resolve()
 
-    # Copy-back reconciles copy mode, which is dotagents' own mess to clean up:
+    # Copy-back reconciles copy mode, which is this tool's own mess to clean up:
     # `link --copy` mirrors store -> project when symlinking isn't available, so
     # the two diverge as soon as the project's copy is edited. This folds those
     # edits back. A symlinked project has no divergence and needs none of it.
@@ -1057,7 +1049,7 @@ def sync_agents(
                     store.mkdir(parents=True, exist_ok=True)
                     _copy_tree(target, store, overwrite=True)
 
-    # Everything past this point is transport, which dotagents does not own: how
+    # Everything past this point is transport, which is left to the user's own setup: how
     # the store reaches other machines -- git, rsync, a cloud drive, nothing at
     # all -- is the user's choice. A hook takes it over entirely; the git path
     # below is only the bundled default.
@@ -1071,7 +1063,7 @@ def sync_agents(
             log(
                 "WARN: %s is not a git repo, no sync hook, and no --remote given; "
                 "nothing to sync. Add a hooks/sync script, or bootstrap git with "
-                "`dotagents sync-project --remote <url>`.",
+                "`private-sync sync --remote <url>`.",
                 agents_dir,
             )
             return 0
@@ -1091,7 +1083,7 @@ def sync_agents(
             " && push" if push else "")
         return 0
 
-    # Auth for the network ops (pull/push): a direct `dotagents sync-project` isn't run
+    # Auth for the network ops (pull/push): a direct `private-sync sync` isn't run
     # through the private-sync hook that would otherwise source the git-auth
     # bypass, so apply it here too. No-op unless DOTAGENTS_AGENTS_TOKEN is set.
     config_args, auth_env, auth_tmp = _agents_git_auth(log)

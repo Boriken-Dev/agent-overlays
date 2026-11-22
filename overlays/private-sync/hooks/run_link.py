@@ -3,10 +3,9 @@
     python -I run_link.py link PROJECT AGENTS_DIR
     python -I run_link.py sync PROJECT AGENTS_DIR MESSAGE
 
-The hooks use this instead of the `dotagents` command line: that loads every command and library
-the project's own `.agents` holds, and a hook is the program that must not run what the agent
-wrote. The library is `../lib/python/_link.py` beside this file; nothing else is imported from
-outside the standard library.
+The hooks use this instead of the `private-sync` script: a hook is the program that must not
+run what the agent wrote, so it loads nothing from the project's own `.agents`. The library is `../lib/python/_link.py`
+beside this file; nothing else is imported from outside the standard library.
 """
 import importlib.util
 import logging
@@ -16,7 +15,7 @@ from pathlib import Path
 
 def load():
     source = Path(__file__).resolve().parent.parent / "lib" / "python" / "_link.py"
-    spec = importlib.util.spec_from_file_location("dotagents_private_sync_link", str(source))
+    spec = importlib.util.spec_from_file_location("private_sync_link", str(source))
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -34,7 +33,7 @@ def main(argv):
     if mode == "link":
         link.link_project(project, agents, logger=log)
         return 0
-    message = argv[4] if len(argv) > 4 else "dotagents: sync"
+    message = argv[4] if len(argv) > 4 else "sync"
     return link.sync_agents(agents, message=message, project_dir=project, logger=log)
 
 

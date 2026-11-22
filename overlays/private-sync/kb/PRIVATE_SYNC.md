@@ -70,16 +70,16 @@ In the directory layout, for each checked-out project, `<project>/.agents` is a
 `add '*'` keeps going when one overlay fails: the others are installed (except
 what requires the failed one), each failure is logged, and it exits non-zero.
 
-Everything below is **one way to use `link-project`/`sync-project`, not what
-dotagents requires**. Two knobs make that concrete: `--store-dir` /
+Everything below is **one way to use `private-sync link` and `private-sync sync`, not
+what the agent tooling requires**. Two knobs make that concrete: `--store-dir` /
 `$AGENTS_STORE_DIR` moves the stores anywhere (relative to the agents dir, or an
 absolute path outside it), and a `hooks/sync` script replaces git entirely. Both
-`link-project` and `sync-project` are optional subcommands — `init`/`install` never
+`link` and `sync` are optional subcommands — `init`/`install` never
 touch a project directory.
 
 ## Commands
 
-- `dotagents link-project [PATH]` — symlink `PATH/.agents` (default: current dir) to its
+- `private-sync link [PATH]` — symlink `PATH/.agents` (default: current dir) to its
   store. An existing real `.agents/` is **adopted** into an empty store on the first
   link (its content moves into the private repo, then the symlink replaces it), so you
   can run it in a project that already has `.agents/`. Re-running is idempotent.
@@ -92,13 +92,12 @@ touch a project directory.
     branch of another repository (see *Two store layouts*); recorded per project.
   - `--agents-dir` defaults to `$AGENTS_HOME`, else `~/.agents` (also for
     `sync-project`).
-- `dotagents sync-project` — reconcile a copy-mode project, then move the store.
+- `private-sync sync` — reconcile a copy-mode project, then move the store.
   - `--project PATH` first copies a **copy-mode** project's `.agents` back into its
     store (symlinked projects need no copy-back — their `.agents` *is* the store). A
     branch-layout store, on `~/.agents` or on the repository `--store-repo` recorded,
     is committed and pushed on its own branch to that repository's `origin`.
-    This is the only part dotagents genuinely owns: it repairs the divergence its
-    own `--copy` fallback creates.
+    This repairs the divergence the `--copy` fallback creates.
   - **Transport** is then handed to `<agents-dir>/hooks/sync` if that exists — it
     gets the store path as `$1` and the message as `$2` (plus `AGENTS_HOME`
     / `AGENTS_SYNC_MESSAGE`), and its exit code is returned. Use it for rsync, a
@@ -112,7 +111,7 @@ touch a project directory.
 
 A linked project's `.agents/scratch/` is `~/.agents/projects/<name>/scratch/`, inside
 the private repo, and the built-in git path commits everything it is not told to
-ignore. So the first `dotagents sync-project` on that path appends a block of default
+ignore. So the first `private-sync sync` on that path appends a block of default
 rules to `~/.agents/.gitignore` (creating the file if there is none):
 
 ```
@@ -152,17 +151,17 @@ gets no block.
 dotagents init -g
 dotagents overlays add engineering private-sync --repo <overlays-checkout>/overlays -g
 # 2. Make ~/.agents a git repo pointing at your private remote, and push.
-dotagents sync-project --remote git@github.com:<you>/.agents.git -m "init: agents repo"
+private-sync sync --remote git@github.com:<you>/.agents.git -m "init: agents repo"
 git -C ~/.agents push -u origin HEAD
 # 3. In any project, link its .agents into the private repo, then sync.
 cd ~/code/some-project
-dotagents link-project .
-dotagents sync-project -m "link some-project"
+private-sync link .
+private-sync sync -m "link some-project"
 ```
 
 On a second machine: `git clone git@github.com:<you>/.agents.git ~/.agents`,
 `dotagents init -g`, then (registry layout) `dotagents overlays add '*' -g`, and
-`dotagents link-project .` inside each project you check out.
+`private-sync link .` inside each project you check out.
 
 ## Cloud sessions
 
@@ -170,8 +169,8 @@ Cloud containers start from a fresh clone with no `~/.agents`. Two overlay hooks
 in this overlay's `overlay.cfg`, scripts in its `hooks/`) make a cloud session identical to local:
 
 - `session-start` runs `private-sync-start.sh`: clones the private repo to `~/.agents` on first
-  run (or `git pull --rebase` if present), then `dotagents link-project`s the project.
-- `turn-end` runs `private-sync-stop.sh`: `dotagents sync-project --project` to push the
+  run (or `git pull --rebase` if present), then `private-sync link`s the project.
+- `turn-end` runs `private-sync-stop.sh`: `private-sync sync --project` to push the
   session's changes back.
 
 They are AOS hooks, so they are **off until you allow them at the overlay's digest**, and
@@ -193,8 +192,7 @@ setup script. The hooks act on the project the harness names, `CLAUDE_PROJECT_DI
 neither they do nothing and say so, because the payload's `cwd` is wherever the agent was and a
 walk up from it could adopt another project. Run by hand, the scripts use the current directory.
 They run the overlay's own `hooks/run_link.py` by path with an isolated Python, not the
-`dotagents` command line, which would load whatever commands and libraries the project's own
-`.agents` holds.
+`private-sync` script, which would load whatever the project's own `.agents` holds.
 
 **Fresh cloud containers (first clone).** The `session-start` hook lives in the
 installed overlay under `~/.agents/`, which doesn't exist until `~/.agents` is first cloned — so the
@@ -248,19 +246,19 @@ this automatically: `hooks/_agents-git-auth.sh` (sourced by both hooks) detects 
 github→proxy rewrite and, when a token is present, points git at an isolated config that
 bypasses the rewrite so the token authenticates directly against `github.com`. Without a
 rewrite it offers the token only for `$AGENTS_REMOTE` (else github.com), through git's
-`GIT_CONFIG_*` environment for the hook's own git and `dotagents` calls; it never
+`GIT_CONFIG_*` environment for the hook's own git calls; it never
 writes `~/.gitconfig`. Nothing to configure beyond `DOTAGENTS_AGENTS_TOKEN`.
 
 ## Gotchas
 
 - **`.gitignore` must exclude `.agents/`** in every project, or the symlink/copy can be
-  committed to the (public) project. `dotagents link-project` warns when it's missing; the base
+  committed to the (public) project. `private-sync link` warns when it's missing; the base
   overlay's Leakage rule already requires it.
-- **Copy mode is two-way**: run `dotagents sync-project --project .` to push local edits back
-  *before* re-running `dotagents link-project --copy` to pull global changes, or a refresh can
+- **Copy mode is two-way**: run `private-sync sync --project .` to push local edits back
+  *before* re-running `private-sync link --copy` to pull global changes, or a refresh can
   overwrite unsynced local edits. Symlink mode has no such hazard — prefer it.
 - **A `.agents.bak` dir** appears when `--force` backs up a conflicting real `.agents/`;
   reconcile and delete it.
 - **The store is the source of truth** once linked: edit `<project>/.agents/...`
   transparently through the symlink; those writes land in `~/.agents/projects/<name>/`
-  and sync with `dotagents sync-project`.
+  and sync with `private-sync sync`.

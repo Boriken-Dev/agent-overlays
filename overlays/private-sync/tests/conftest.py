@@ -1,7 +1,6 @@
 """Make the overlay's lib/python/ importable for the tests, regardless of cwd.
 
-Mirrors the `net` overlay's conftest. The commands themselves do NOT rely on this
-(they load `lib/python/_link.py` by path -- see `cmds/link_project.py`); the tests import
+The skill and the hooks load `lib/python/_link.py` by path; the tests import
 `_link` directly, so they put `lib/python/` on `sys.path` here.
 """
 import sys

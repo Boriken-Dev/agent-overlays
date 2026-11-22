@@ -27,12 +27,12 @@ if [ -z "$PROJECT_DIR" ] && [ -z "${AOS_HOOK_EVENT:-}" ]; then
     PROJECT_DIR="$PWD"
 fi
 if [ -z "$PROJECT_DIR" ]; then
-    echo "dotagents: private-sync: the harness did not name the project (CLAUDE_PROJECT_DIR, AGENTS_PROJECT_ROOT); doing nothing" >&2
+    echo "private-sync: the harness did not name the project (CLAUDE_PROJECT_DIR, AGENTS_PROJECT_ROOT); doing nothing" >&2
     exit 0
 fi
 
-# `link-project` and `sync-project` are run by this overlay's own file, by path, with an isolated
-# Python: not through the `dotagents` command line, which would load whatever commands and
+# link and sync are run by this overlay's own file (`run_link.py`), by path, with an isolated
+# Python: not through the `private-sync` script, which would load whatever commands and
 # libraries the project's `.agents` holds.
 _DG_HERE="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)"
 _DG_PY="${AGENTS_PYTHON:-python3}"
@@ -43,24 +43,24 @@ _DG_PY="${AGENTS_PYTHON:-python3}"
 _DG_AUTH="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)/_agents-git-auth.sh"
 if [ -f "$_DG_AUTH" ]; then
     . "$_DG_AUTH"
-    _dotagents_git_auth
+    _agents_git_auth
 fi
 
 # 1. Ensure the private repo is present and current.
 if [ -d "$AGENTS_DIR/.git" ]; then
     git -C "$AGENTS_DIR" pull --rebase --autostash --quiet \
-        || echo "dotagents: pull failed (offline?), using local copy" >&2
+        || echo "private-sync: pull failed (offline?), using local copy" >&2
 elif [ -n "${AGENTS_REMOTE:-}" ]; then
-    echo "dotagents: cloning private agents repo into $AGENTS_DIR" >&2
+    echo "private-sync: cloning private agents repo into $AGENTS_DIR" >&2
     git clone --quiet "$AGENTS_REMOTE" "$AGENTS_DIR" \
-        || { echo "dotagents: clone failed" >&2; exit 0; }
+        || { echo "private-sync: clone failed" >&2; exit 0; }
 else
-    echo "dotagents: no $AGENTS_DIR/.git and no AGENTS_REMOTE set; skipping link" >&2
+    echo "private-sync: no $AGENTS_DIR/.git and no AGENTS_REMOTE set; skipping link" >&2
     exit 0
 fi
 
 # 2. Link this project's .agents to its per-project store.
 "$_DG_PY" -I "$_DG_HERE/run_link.py" link "$PROJECT_DIR" "$AGENTS_DIR" >&2 \
-    || echo "dotagents: link failed" >&2
+    || echo "private-sync: link failed" >&2
 
 exit 0

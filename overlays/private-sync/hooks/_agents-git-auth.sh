@@ -14,11 +14,11 @@
 #     directly against the real github.com.
 #
 # When a bypass is needed it exports GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM into
-# the caller's environment, so a subsequent `git clone` / `dotagents sync-project`
+# the caller's environment, so a subsequent `git clone` / `private-sync sync`
 # (whose git subprocesses inherit them) reaches github.com instead of the proxy.
 # A no-op when no token is set.
 
-_dotagents_git_auth() {
+_agents_git_auth() {
     [ -n "${DOTAGENTS_AGENTS_TOKEN:-}" ] || return 0
 
     _dg_helper='!f() { printf "username=x-access-token\npassword=%s\n" "$DOTAGENTS_AGENTS_TOKEN"; }; f'
@@ -72,6 +72,6 @@ _dotagents_git_auth() {
     GIT_CONFIG_GLOBAL="$_dg_cfg"
     GIT_CONFIG_SYSTEM=/dev/null
     export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
-    echo "dotagents: github.com git is rewritten to an in-session proxy; bypassing it for token auth"
+    echo "private-sync: github.com git is rewritten to an in-session proxy; bypassing it for token auth"
     unset _dg_helper _dg_rewrite _dg_name _dg_email _dg_cfg _dg_ca
 }
