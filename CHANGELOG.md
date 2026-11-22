@@ -55,3 +55,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - rust: `unsafe` is allowed when proved necessary (no safe API does it, or a measured performance need), with the reason kept in
   the list of allowed files; a limitation kept only to avoid `unsafe` is a defect.
+
+### Fixed
+
+- release: `build.py scan` no longer flags text in a single-byte encoding (ISO-8859-1, Windows-1252, or UTF-8 holding a stray
+  such byte) as an unrecognised binary. Text with no NUL, no control character but tab, LF, FF and CR, and at most 10% of its
+  bytes from 0x80 up passes and is reported as `NOTE text, not UTF-8`; a private key in it is still refused, and binaries,
+  random bytes and UTF-16 are still flagged.

@@ -225,6 +225,56 @@ def test_text_and_images_pass(build, label):
     assert build.flagged_kind(PASSING[label], "file.dat") is None
 
 
+# Markdown with a UTF-8 "i" and one stray ISO-8859-1 byte, the profile of three benchmarks/README.md
+# blobs in a real history: 6.7 KB, 3 bytes from 0x80 up, no control character.
+MIXED_MARKDOWN = (
+    b"# Benchmarks\n\n" + b"| case | median | note |\n|---|---|---|\n" * 120
+    + "Bohío's code at `1248e0`\n".encode() + b"Boh\xedo is the host.\n"
+)
+# Spanish prose in ISO-8859-1: about 4% of its bytes are from 0x80 up (ordinary prose is 2 to 5%).
+LATIN1_PROSE = ("La canción del señor niño, mañana también llega, y los niños cantan en la plaza del pueblo. " * 80).encode("latin-1")
+ELF_WITH_STRINGS = b"\x7fELF\x02\x01\x01" + b"\x00" * 9 + b"/lib64/ld-linux.so.2\x00printf\x00" * 40
+
+
+@pytest.mark.parametrize("body", [MIXED_MARKDOWN, LATIN1_PROSE], ids=["mixed", "latin1"])
+def test_text_in_a_single_byte_encoding_passes_with_a_note(build, body):
+    with pytest.raises(UnicodeDecodeError):
+        body.decode("utf-8")
+    assert build.flagged_kind(body, "README.md") is None
+    assert build.text_note(body) == "text, not UTF-8"
+
+
+def test_text_note_is_only_for_text_that_is_not_utf8(build):
+    assert build.text_note(b"plain ascii\n") is None
+    assert build.text_note("Bohío\n".encode()) is None
+    assert build.text_note(b"\x00" * 40) is None
+
+
+@pytest.mark.parametrize("label", ["pem after latin-1 text", "pem in latin-1 prose"])
+def test_a_private_key_in_latin1_text_is_still_refused(build, label):
+    body = b"caf\xe9 key:\n" + PEM if label.startswith("pem after") else LATIN1_PROSE + PEM + LATIN1_PROSE
+    assert build.flagged_kind(body, "notes.txt") == "private key in text"
+
+
+@pytest.mark.parametrize(
+    "label, body",
+    [
+        ("random bytes", noise(4096)),
+        ("elf header with strings", ELF_WITH_STRINGS),
+        ("pe header", b"MZ\x90\x00\x03" + b"\x00" * 55 + b"This program cannot be run in DOS mode.\r\r\n$" + b"\x00" * 200),
+        ("text with a NUL", b"printable text\n" * 400 + b"\xff\x00"),
+        ("text with a control character", b"printable text\n" * 400 + b"\xff\x01"),
+        ("mostly high bytes", b"\xe9\xe8" * 300 + b"abc"),
+        ("utf-16 text", "a readable line of text\n".encode("utf-16") * 30),
+    ],
+    ids=lambda v: v if isinstance(v, str) else "body",
+)
+def test_binary_content_is_not_mistaken_for_legacy_text(build, label, body):
+    # A NUL or control byte in otherwise valid UTF-8 is text to a scanner too: only non-UTF-8 is judged here.
+    assert build.flagged_kind(body, "file.dat") in {"unrecognised binary", "opaque high-entropy data", "elf executable", "windows executable"}
+    assert build.text_note(body) is None
+
+
 def test_a_key_file_is_refused_by_its_name(build):
     assert build.flagged_kind(b"text", "server.pfx") == "key or keystore file"
 
@@ -976,6 +1026,22 @@ def test_scan_all_refs_finds_a_blob_that_history_still_holds(build, tmp_path, ca
     assert build.main(["--root", str(root), "scan", "--all-refs"]) == 1
     out = capsys.readouterr().out
     assert "FLAG elf executable: 1" in out and "secret.bin" in out
+
+
+def test_scan_passes_legacy_text_in_history_and_prints_a_note(build, tmp_path, capsys):
+    root = init_repo(tmp_path / "legacy")
+    ctx_for(build, root)
+    (root / "README.md").write_bytes(MIXED_MARKDOWN)
+    commit_all(root)
+    (root / "README.md").write_bytes(MIXED_MARKDOWN.replace(b"\xed", b"i"))
+    commit_all(root, "fix the byte")
+    for argv in (["--all-refs"], ["HEAD~1"], ["--tree", str(root)]):
+        capsys.readouterr()
+        assert build.main(["--root", str(root), "scan", *argv]) == 0, argv
+        out = capsys.readouterr().out
+        if argv[0] != "--tree":
+            assert "NOTE text, not UTF-8: 1" in out and "README.md" in out and "FLAG" not in out, argv
+        assert out.strip().split("\n")[-1].startswith("PASS: 0 flagged")
 
 
 def test_scan_a_tree_and_allow(build, tmp_path, capsys):

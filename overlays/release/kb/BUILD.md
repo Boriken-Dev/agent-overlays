@@ -51,8 +51,10 @@ commit and the SHA-256 of `Cargo.lock`, and the checks read it.
 - A mirror of crates.io is `[deps] crates_url` or `$BUILD_CRATES_URL`.
 - `scan [REF...|--all-refs|--tree DIR]` prints what is refused and `PASS|FAIL: N flagged, M paths scanned`. It is strict: a
   file that is not text or a known image or font is flagged, including `wasm`, `pdf`, `sqlite` and unrecognised binaries.
-  `[deps] allow` lets one kind through one path pattern (`"cdn/www.gstatic.com/flutter-canvaskit/*:wasm"`); a repository with
-  text files that are not UTF-8 allows `"*:unrecognised binary"` for the whole-history scan.
+  `[deps] allow` lets one kind through one path pattern (`"cdn/www.gstatic.com/flutter-canvaskit/*:wasm"`).
+  Text that is not UTF-8 (ISO-8859-1, Windows-1252, or UTF-8 with a stray such byte) passes and prints
+  `NOTE text, not UTF-8`, as `file` calls it text: no NUL, no control character but tab, LF, FF and CR, and at most 10% of
+  its bytes from 0x80 up. A private key in it is still refused; UTF-16 and anything with NULs is still a binary.
 
 ## Flutter (`[deps.pub]`, `[deps.cdn]`, `offline`, `flutter`)
 
