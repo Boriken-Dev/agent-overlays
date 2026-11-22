@@ -17,8 +17,8 @@ curlike's own (``pycurl``), called by ``bin/curl.py`` as :func:`main`.
      the command line, which other accounts can read); and for a Schannel curl
      (Windows), ``--ssl-revoke-best-effort`` (``CURL_SSL_REVOKE``). A leading
      ``-q`` stays first. ``CURL=0`` runs it exactly as typed. When curl cannot
-     use the proxy it was given, the settings are read once more from
-     ``dotagents env`` and, if they changed, curl runs once more
+     use the proxy it was given, the settings are read once more from the
+     command ``ENV_REFRESH`` names and, if they changed, curl runs once more
      (:func:`_replan`).
   3. **Else curlike** (``curlike.main``): the common curl surface over the
      standard library. So is a request through a ``prefix`` gateway, which
@@ -84,14 +84,15 @@ _LOST = 56
 _PRINTS_ON_FAILURE = ("-w", "--write-out", "-i", "--include", "--show-headers", "-D", "--dump-header")
 # The settings that decide a request's route and trust, by the end of their name.
 _ROUTE_SETTINGS = ("PROXY", "PROXY_AUTH", "PROXY_AUTH_HEADER", "PROXY_TYPE", PROXY_CA, CA_BUNDLE)
-# Seconds for `dotagents env`, which runs every env file of the session's stores.
+# Seconds the ``ENV_REFRESH`` command may take.
 _ENV_TIMEOUT = 30
+REFRESH = "ENV_REFRESH"
 # Programs that read a command line as script text: an argument appended to
 # them is parsed again, so a URL's `&` or `;` runs as a command.
 _INTERPRETERS = ("cmd", "powershell", "pwsh", "wsl")
 _BATCH = (".cmd", ".bat")
 def venv_curl(prefix=None):
-    """The ``curl`` launcher dotagents makes for ``bin/curl.py`` in the venv at
+    """The ``curl`` launcher made for ``bin/curl.py`` in the venv at
     ``prefix`` (default: the one running this), ``<venv>/overlays/curl``
     (``curl.exe`` on Windows), whether or not it exists."""
     return os.path.join(prefix or sys.prefix, "overlays", "curl.exe" if os.name == "nt" else "curl")
@@ -510,31 +511,49 @@ def _replayable(group):
     return True
 
 
-def _dotagents():
-    """The ``dotagents`` on PATH's absolute directories, or ``None``. The current
-    directory is never searched: this runs on a failure, in whatever directory
-    the caller stands in."""
+def _refresh_command():
+    """The argv ``<PREFIX>ENV_REFRESH`` names, or ``None``: a command line split like a
+    POSIX shell's (no shell runs it), whose program is an absolute path or a name found
+    in PATH's absolute directories. The current directory is never searched: this runs
+    on a failure, in whatever directory the caller stands in."""
+    import shlex
+
+    raw = (_env().get(REFRESH) or "").strip()
+    try:
+        # Backslashes are path separators on Windows, not escapes.
+        argv = shlex.split(raw, posix=os.name != "nt") if raw else []
+        if os.name == "nt":
+            argv = [part[1:-1] if len(part) > 1 and part[0] == part[-1] == '"' else part for part in argv]
+    except ValueError:
+        return None
+    if not argv:
+        return None
+    program = argv[0]
+    if os.path.isabs(program):
+        return argv if os.path.isfile(program) else None
+    if os.sep in program or (os.altsep and os.altsep in program):
+        return None
     exts = os.environ.get("PATHEXT", ".COM;.EXE;.CMD").lower().split(";") if os.name == "nt" else [""]
     for directory in os.environ.get("PATH", "").split(os.pathsep):
         if directory and os.path.isabs(directory):
             for ext in exts:
-                candidate = os.path.join(directory, "dotagents" + ext)
+                candidate = os.path.join(directory, program + ext)
                 if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                    return candidate
+                    return [candidate, *argv[1:]]
     return None
 
 
 def _session_environment():
-    """What ``dotagents env`` assembles now over this environment, as a mapping
-    (a value of ``None`` is an unset), or ``None`` when it cannot say. Its output
-    holds secrets: nothing of it is printed. The recursion marker sends a curl
-    that an env file runs to curlike, so it cannot come back here."""
-    program = _dotagents()
-    if not program:
+    """What the ``ENV_REFRESH`` command prints now, a JSON object of variables (a value
+    of ``null`` is an unset), or ``None`` when there is no command or it cannot say. The
+    output holds secrets: nothing of it is printed. The recursion marker sends a curl
+    that the command runs to curlike, so it cannot come back here."""
+    command = _refresh_command()
+    if not command:
         return None
     try:
         run = subprocess.run(
-            [program, "env", "--format", "json"],
+            command,
             env=_child_env(),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,

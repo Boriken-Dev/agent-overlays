@@ -16,7 +16,7 @@ Every OS ships a trust store; one without any (a bare container) is configured
 by pointing an override variable at a bundle. With nothing at all,
 ``where()`` returns ``None`` and says once, on stderr, which variables to set.
 
-``dotagents env`` puts ``overlays/net/lib`` on ``PYTHONPATH``, ahead of any real
+The session puts ``overlays/net/lib`` on ``PYTHONPATH``, ahead of any real
 ``certifi``, so a bundled ``requests`` verifies TLS against the OS trust store.
 Pure stdlib; Python 3.9+.
 """
@@ -65,7 +65,7 @@ def built_bundle_path():
         base = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(
             os.path.expanduser("~"), ".cache"
         )
-    return os.path.join(base, "dotagents-net", "cacert.pem")
+    return os.path.join(base, "agents-net", "cacert.pem")
 
 
 def _windows_certs():
@@ -170,7 +170,7 @@ def _warn_no_source():
     if not _warned:
         _warned = True
         sys.stderr.write(
-            "certifi (dotagents net overlay): the system has no CA certificates; "
+            "certifi (net overlay): the system has no CA certificates; "
             "set one of %s to a bundle\n" % ", ".join("$" + v for v in OVERRIDE_VARS)
         )
 

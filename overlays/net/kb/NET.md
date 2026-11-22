@@ -1,8 +1,8 @@
 # NET — HTTP tooling for agents
 
-Installed by `dotagents overlays add net`. It brings two packages from PyPI
-into the agents' shared Python environment (this overlay's `lib/python/requirements.txt`, which
-dotagents installs on `add` and every `sync`, and which the interpreter `$AGENTS_PYTHON` names imports):
+It brings two packages from PyPI into the agents' shared Python environment
+(this overlay's `lib/python/requirements.txt`, which the tool that installs the
+overlay installs, and which the interpreter `$AGENTS_PYTHON` names imports):
 
 - **syshttp** — proxy resolution with credentials and prefix gateways (with
   no proxy variable set, the system's own proxy configuration, PAC and WPAD
@@ -30,16 +30,16 @@ unprefixed**: the machine's `HTTPS_PROXY` or `NO_PROXY` are not the agents'.
 The real curl still reads its own variables as curl names them, and so does
 curlike for curl's own `CURL_CA_BUNDLE`.
 
-`dotagents env` puts `bin/` on `PATH` and `lib/python/` (the certifi shim) on
+The session puts `bin/` on `PATH` and `lib/python/` (the certifi shim) on
 `PYTHONPATH`. The curl launcher also puts the overlay libs on `PYTHONPATH`
 for what it starts, so the shim works from any shell.
 
 ## curl — `$NET_OVERLAY_ROOT/bin/curl.py`
 
-dotagents makes `curl` from `bin/curl.py`, the `[scripts]` entry
+`curl` is made from `bin/curl.py`, the `[scripts]` entry
 `curl = "bin/curl.py"` in this overlay's `overlay.cfg`: a launcher in the agents' venv,
 `<venv>/overlays/curl` (`curl.exe` on Windows), made whenever the venv is
-synced and put first on `PATH` by `dotagents env`, ahead of the system's
+synced and put first on `PATH` by the session, ahead of the system's
 curl. On Windows it is a native program, never a `.cmd`: cmd.exe parses a
 batch file's command line before it runs, so a URL's `&`, `|`, `>` or
 `%VAR%` would act. The launcher runs `bin/curl.py` under the venv's
@@ -105,8 +105,12 @@ curlike verifies with the OS store or `CURL_CA_BUNDLE`. A file that does not exi
 is curl's exit 2, naming it.
 
 **A proxy curl cannot use**: when curl exits 7 (refused) or 56 with a 502 to CONNECT
-from a proxy this launcher gave it, `dotagents env` is asked for the settings again,
-which is what a shell that predates a proxy restart is missing. If the proxy, its
+from a proxy this launcher gave it, the command `AGENTS_ENV_REFRESH` names is run to
+get the settings again, which is what a shell that predates a proxy restart is missing.
+It is a command line split like a POSIX shell's (nothing interprets it), its program an
+absolute path or a name in an absolute directory of `PATH`, and it prints the session's
+variables as one JSON object (`null` unsets one); nothing it prints is shown. Without it,
+curl's failure stands. If the proxy, its
 credential, its CA or `AGENTS_NO_PROXY` differ, curl runs once more with them, all
 taken together; otherwise its failure stands. These are not run again, since the
 first attempt has already had an effect: more than one `--next` group, stdout written
@@ -123,7 +127,7 @@ bundle FILE from the OS trust store —
 3. otherwise a bundle **built from the system's certificates** — the Windows ROOT and
    CA stores (Windows keeps its roots there, not in a file), a hashed certs directory
    (`$SSL_CERT_DIR`, OpenSSL's default, `/etc/ssl/certs`), whatever OpenSSL loads by
-   default — written to a per-user file (`%TEMP%\dotagents-net\cacert.pem`;
+   default — written to a per-user file (`%TEMP%\agents-net\cacert.pem`;
    `$XDG_RUNTIME_DIR` or `~/.cache` on POSIX, never a shared `/tmp`), a cache rebuilt
    when it is older than a minute;
 4. nothing: `None`, and a one-time note on stderr naming the variables to set (a bare

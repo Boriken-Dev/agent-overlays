@@ -31,7 +31,7 @@ def _bundle_home(monkeypatch, tmp_path):
     """Point the built bundle at tmp (Windows: %TEMP%; POSIX: XDG_RUNTIME_DIR)."""
     monkeypatch.setattr(certifi.tempfile, "gettempdir", lambda: str(tmp_path))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    return tmp_path / "dotagents-net" / "cacert.pem"
+    return tmp_path / "agents-net" / "cacert.pem"
 
 
 def _only_dir_certs(monkeypatch, tmp_path):
