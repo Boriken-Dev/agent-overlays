@@ -1,4 +1,4 @@
-"""Characterization tests for `dotagents pyvenv` (the python overlay's own cmd).
+"""Characterization tests for the `pyvenv` skill.
 
 Covers: os/arch bucketing, version probing/parsing, interpreter discovery
 plumbing (with subprocess mocked out -- these tests never spawn a real venv),
@@ -240,10 +240,7 @@ def test_venv_dir_is_named_for_the_target_interpreters_arch(tmp_path, monkeypatc
     the running process's idea of the machine."""
     import pyvenv as mod
 
-    class FakeScope:
-        global_scope = False
-        project_root = tmp_path
-        agents_root = tmp_path / ".agents"
+    scope = mod.Scope(tmp_path)
 
     target = tmp_path / "arm64-python"
     monkeypatch.setattr(mod, "_resolve_interpreter", lambda version, logger=None: target)
@@ -251,7 +248,7 @@ def test_venv_dir_is_named_for_the_target_interpreters_arch(tmp_path, monkeypatc
     monkeypatch.setattr(mod, "_probe_arch", lambda p: "arm64" if p == target else "amd64")
     monkeypatch.setattr(mod, "_os_bucket", lambda: "nt")
 
-    venv_dir, interpreter = mod._venv_target(FakeScope(), "3.14")
+    venv_dir, interpreter = mod._venv_target(scope, "3.14")
     assert interpreter == target
     assert venv_dir == tmp_path / ".pyvenv" / "3.14.7-nt-arm64"
 
@@ -260,7 +257,6 @@ def _py_scope(tmp_path, monkeypatch):
     """A project scope whose interpreter resolution is faked to 3.14.7 nt arm64,
     with the home directory under ``tmp_path``."""
     import pyvenv as mod
-    from dotagents._scope import Scope
 
     monkeypatch.setattr(mod, "_resolve_interpreter", lambda version, logger=None: tmp_path / "py")
     monkeypatch.setattr(mod, "_probe_version", lambda p: (3, 14, 7))
@@ -268,14 +264,13 @@ def _py_scope(tmp_path, monkeypatch):
     monkeypatch.setattr(mod, "_os_bucket", lambda: "nt")
     for name in ("HOME", "USERPROFILE"):
         monkeypatch.setenv(name, str(tmp_path / "home"))
-    project = tmp_path / "proj" / ".agents"
-    project.mkdir(parents=True)
-    return mod, Scope("project", project, user_root=tmp_path / "home" / ".agents",
-                      project_root=project.parent)
+    project = tmp_path / "proj"
+    (project / ".agents").mkdir(parents=True)
+    return mod, mod.Scope(project)
 
 
 def test_venvs_live_in_the_project_tree_never_in_the_agents_store(tmp_path, monkeypatch):
-    # <store>/.pyvenv holds the agents' venvs, which dotagents builds itself.
+    # .agents/.pyvenv holds the agents' own venvs.
     mod, scope = _py_scope(tmp_path, monkeypatch)
     venv, _ = mod._venv_target(scope, "3.14")
     assert venv == tmp_path / "proj" / ".pyvenv" / "3.14.7-nt-arm64"
@@ -286,7 +281,7 @@ def test_venvs_live_in_the_project_tree_never_in_the_agents_store(tmp_path, monk
 def test_py_runs_the_user_venv_when_the_project_has_none(tmp_path, monkeypatch):
     mod, scope = _py_scope(tmp_path, monkeypatch)
     chosen = mod._run_target(scope, "3.14", logger=None)
-    assert chosen.level == "user" and chosen.agents_root == scope.user_root
+    assert chosen.global_scope and chosen.root == tmp_path / "home"
 
 
 def test_py_runs_a_project_venv_that_exists(tmp_path, monkeypatch):
@@ -295,6 +290,61 @@ def test_py_runs_a_project_venv_that_exists(tmp_path, monkeypatch):
     mod._venv_python(venv).parent.mkdir(parents=True)
     mod._venv_python(venv).write_bytes(b"")
     assert mod._run_target(scope, "3.14", logger=None) is scope
+
+
+def test_the_project_root_is_the_nearest_directory_with_agents(tmp_path, monkeypatch):
+    import pyvenv as mod
+
+    monkeypatch.delenv("AGENTS_PROJECT_ROOT", raising=False)
+    (tmp_path / "proj" / ".agents").mkdir(parents=True)
+    deep = tmp_path / "proj" / "a" / "b"
+    deep.mkdir(parents=True)
+    assert mod.resolve_scope(False, cwd=deep).root == (tmp_path / "proj").resolve()
+
+
+def test_the_environment_names_the_project_root(tmp_path, monkeypatch):
+    import pyvenv as mod
+
+    monkeypatch.setenv("AGENTS_PROJECT_ROOT", str(tmp_path))
+    assert mod.resolve_scope(False).root == tmp_path.resolve()
+    assert mod.resolve_scope(True).global_scope
+
+
+def test_run_passes_everything_after_the_dashes_to_the_venv_python(tmp_path, monkeypatch):
+    import duho
+    import pyvenv as mod
+
+    mod_, scope = _py_scope(tmp_path, monkeypatch)
+    monkeypatch.setenv("AGENTS_PROJECT_ROOT", str(scope.root))
+    venv, _ = mod._venv_target(scope, "3.14")
+    fake = mod._venv_python(venv)
+    fake.parent.mkdir(parents=True)
+    fake.write_bytes(b"")
+    seen = []
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, **kw: seen.append(cmd) or subprocess.CompletedProcess(cmd, 7))
+    code = duho.main(mod.Pyvenv, ["run", "3.14", "--", "-c", "print(1)", "-v"])
+    assert code == 7
+    assert seen == [[str(fake), "-c", "print(1)", "-v"]]
+
+
+def test_create_dry_run_makes_nothing(tmp_path, monkeypatch):
+    import duho
+    import pyvenv as mod
+
+    mod_, scope = _py_scope(tmp_path, monkeypatch)
+    monkeypatch.setenv("AGENTS_PROJECT_ROOT", str(scope.root))
+    assert duho.main(mod.Pyvenv, ["create", "--dry-run", "3.14"]) == 0
+    assert not (scope.root / ".pyvenv").exists()
+
+
+def test_a_real_venv_is_made(tmp_path):
+    import pyvenv as mod
+
+    target = tmp_path / "v"
+    log = mod.logging.getLogger("t")
+    mod._make_venv(target, Path(sys.executable), log)
+    assert mod._venv_python(target).is_file()
 
 
 def test_windows_discovery_skips_the_active_venv_and_any_venv_python(tmp_path, monkeypatch):

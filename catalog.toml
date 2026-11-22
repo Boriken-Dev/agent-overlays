@@ -45,7 +45,7 @@ tags = ["sync", "workflow"]
 
 [overlays.python]
 source = "overlays/python"
-description = "Conventions and library standards for Python work, a pyproject and mkdocs template, CI workflows, and the commands pyvenv and py, which make and run project virtual environments. Builds on the engineering overlay."
+description = "Conventions and library standards for Python work, a pyproject and mkdocs template, CI workflows, and the pyvenv skill, which makes and runs project virtual environments. Builds on the engineering overlay."
 
 [overlays.python.about]
 summary = "Python repository conventions, library standards, templates and project virtual environments."

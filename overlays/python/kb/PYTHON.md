@@ -65,17 +65,17 @@ in its `.agents/AGENTS.md`.
 - **Version policy**: develop on the **latest** stable Python (3.14) and also
   test the **floor** in `requires-python` (3.9). CI runs the full matrix;
   locally, test latest by default and the floor before a release or after a
-  significant chunk of work (`dotagents py 3.9 -- -m pytest -q`).
+  significant chunk of work (`pyvenv run 3.9 -- -m pytest -q`).
 - **Project venvs live in `<project>/.pyvenv/<version>-<os>-<arch>/`**
-  (gitignored), one per interpreter, created with **`dotagents pyvenv
+  (gitignored), one per interpreter, created with **`pyvenv create
   [version]`**, never by hand and never in `.venv/`. No version means the
   latest Python on the machine. Re-running it leaves an existing venv as it
-  is. `-g` makes one in `~/.pyvenv/` instead. **Never** install into the
+  is. `-g` (`--global`) makes one in `~/.pyvenv/` instead. **Never** install into the
   system or user Python unless told to. A project that keeps its venvs
   elsewhere (its own `.venv/`, uv, poetry) records that in its
   `.agents/AGENTS.md`; follow the record and do not move them.
 - **Agents' venvs are not project venvs.** `.agents/.pyvenv/` holds the venvs
-  dotagents builds for skills, overlay helpers and setup scripts
+  the agents' tooling builds for skills, overlay helpers and setup scripts
   (`$AGENTS_PYTHON`). Never create one, install into one or test a project in
   one.
 - **How a venv is named**: `<os>` is `nt`/`posix`/`darwin`; `<arch>` is what
@@ -86,7 +86,7 @@ in its `.agents/AGENTS.md`.
   **Native first**: among installs that satisfy the spec, one built for the
   machine's architecture wins before a higher version (an ARM64 3.9.10 over an
   emulated x64 3.9.13), with a warning when only an emulated one fits.
-- **Running Python: `dotagents py [version] -- <args>`**. It runs the
+- **Running Python: `pyvenv run [version] -- <args>`**. It runs the
   project's `.pyvenv/` venv for that version when one exists, else the user
   one in `~/.pyvenv/` (created when missing); it never creates a project venv.
   Everything after `--` goes to the interpreter, with the real stdio and exit
@@ -94,12 +94,12 @@ in its `.agents/AGENTS.md`.
   venv's own executables are needed, they are under `Scripts\` (Windows) or
   `bin/`.
   ```
-  dotagents py -- -c "print(1)"       # latest Python on the machine
-  dotagents py 3.9 -- -m pytest -q    # the floor
+  pyvenv run -- -c "print(1)"       # latest Python on the machine
+  pyvenv run 3.9 -- -m pytest -q    # the floor
   ```
 - **Interpreters**: add them with the Python Manager (`py install <ver>`;
-  `py -0p` lists installs with their paths); `dotagents pyvenv` and
-  `dotagents py` find them the same way. **Avoid Microsoft Store Python**: its
+  `py -0p` lists installs with their paths); `pyvenv create` and
+  `pyvenv run` find them the same way. **Avoid Microsoft Store Python**: its
   app-execution alias sandboxes the filesystem, and `pip install` exits 0
   having installed nothing.
 - **Install**: `python -m pip install -e ".[dev,<extras-with-tests>]"` in the

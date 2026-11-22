@@ -1,27 +1,22 @@
-"""`dotagents pyvenv` -- create a shared venv for a Python version, once.
+"""`pyvenv` -- create a shared venv for a Python version, once, and run Python in it.
 
-Also ships `dotagents py`: run a python subprocess using this same shared
-venv store, passing everything after ``--`` straight through (duho's
-``_passthrough_`` convention -- ``dotagents py -- -c "print(1)"`` runs
-``python -c "print(1)"`` against the resolved venv's interpreter). It
-creates the venv first if missing (the same idempotent create-or-reuse
-``Pyvenv`` logic, not a separate code path), so ``py`` is really "the venv
-command AND where you run things with it" -- one command finds/creates the
-interpreter, the other one uses it.
+    pyvenv create [version]          make the venv if it is missing
+    pyvenv run [version] -- <args>   run its python (made first when missing)
 
-Discovered command module shipped BY THIS OVERLAY (per-overlay ``cmds/``
-discovery): plain dotagents ships no ``pyvenv`` command -- installing the
-``python`` overlay is what makes it exist.
+``run`` passes everything after ``--`` straight to the interpreter (duho's
+``_passthrough_`` convention): ``pyvenv run -- -c "print(1)"`` runs
+``python -c "print(1)"`` against the resolved venv, with the real terminal
+streams.
 
 **Where the venv lives**: ``<root>/.pyvenv/<version>-<os>-<arch>/``, where
-``<root>`` is the parent of the scope's store: the project root (a sibling of
-its ``.agents``), or the home directory for ``-g``. Never inside the store:
-``<store>/.pyvenv/`` holds the agents' venvs, which dotagents itself builds
-and syncs (``dotagents._pyvenv``) for skills to run in.
+``<root>`` is the project root (``$AGENTS_PROJECT_ROOT``, else the nearest
+directory above the current one holding ``.agents``, else the git root, else
+the current directory), or the home directory with ``-g``. Never inside
+``.agents/``: ``.agents/.pyvenv/`` holds the agents' own venvs.
 
-**``py`` creates nothing in a project**: it runs the project's venv when one
+**``run`` creates nothing in a project**: it runs the project's venv when one
 exists for the version, else the user one (``~/.pyvenv``, created when
-missing). Only an explicit ``pyvenv`` creates a project venv.
+missing). Only an explicit ``create`` makes a project venv.
 
 ``<os>`` is ``os.name`` (``nt``/``posix``) EXCEPT macOS, which ``os.name``
 reports as ``posix`` same as Linux -- explicitly called out by the user as a
@@ -60,24 +55,51 @@ from its filename alone.
 
 from __future__ import annotations
 
+import logging
 import re
+import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from dotagents.cli import DotAgentsArgs
+from duho import Cli, Cmd, LoggingArgs
 
-# `Pyvenv` inherits `DotAgentsArgs` (`dotagents.cli`) for the shared
-# `-g/--global` + `--agents-dir` fields every scope-aware command uses (`init`,
-# `overlays add/remove/sync`) -- same fields, same `resolve_scope` behind them,
-# so `pyvenv`'s scope behaves identically to every other command's, not a
-# reimplementation that could drift. This DOES mean `dotagents` must be
-# importable to even define this class, unlike private-sync's `_link.py`
-# (this overlay's own tests install the real `dotagents` package as a test
-# dependency rather than avoiding the import -- see tests/conftest.py).
-# Everything else in this file (os/arch bucketing, interpreter discovery,
-# version probing) is pure stdlib and independently testable regardless.
+_LOG = logging.getLogger("pyvenv")
+
+
+@dataclass(frozen=True)
+class Scope:
+    """Where venvs are kept: under ``root / ".pyvenv"``."""
+
+    root: Path
+    global_scope: bool = False
+
+
+def resolve_scope(global_scope: bool, cwd: "Optional[Path]" = None) -> Scope:
+    """The home directory for ``-g``; else the project root."""
+    import os
+
+    if global_scope:
+        return Scope(Path.home(), True)
+    env_root = os.environ.get("AGENTS_PROJECT_ROOT")
+    if env_root:
+        return Scope(Path(env_root).expanduser().resolve())
+    start = (cwd or Path.cwd()).resolve()
+    for candidate in (start, *start.parents):
+        if (candidate / ".agents").is_dir():
+            return Scope(candidate)
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], cwd=str(start),
+            capture_output=True, text=True, timeout=5,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return Scope(Path(proc.stdout.strip()).resolve())
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return Scope(start)
 
 
 def _venv_python(venv_dir: Path) -> Path:
@@ -164,7 +186,7 @@ _PROBES: "dict[tuple[str, str], object]" = {}
 def _cached(kind: str, python: Path, probe):
     """Memoize a probe of an EXISTING interpreter for this process: the answer
     cannot change within a run, and `_venv_target` would otherwise re-spawn the
-    interpreter `_best_candidate` just probed (2 spawns per `dotagents py`).
+    interpreter `_best_candidate` just probed (2 spawns per `pyvenv run`).
     Non-files are never cached, so a test's fake path is probed afresh."""
     try:
         key = (kind, str(python.resolve())) if python.is_file() else None
@@ -403,7 +425,7 @@ def _best_candidate(accept, logger) -> "Optional[Path]":
     native, probed, candidate, arch = ranked[0]
     if logger is not None and not native:
         logger.warning(
-            "pyvenv: no %s-native interpreter satisfies the spec; using %s (%s, built for %s)"
+            "no %s-native interpreter satisfies the spec; using %s (%s, built for %s)"
             % (host, candidate, "%d.%d.%d" % probed, arch or "unknown arch")
         )
     return candidate
@@ -411,43 +433,46 @@ def _best_candidate(accept, logger) -> "Optional[Path]":
 
 def _venv_target(scope, py_version: "Optional[str]", logger=None) -> "tuple[Path, Path]":
     """The venv dir a given scope + version spec resolves to, whether or not it
-    exists yet -- the single naming rule shared by ``pyvenv`` and ``py``."""
-    pyvenv_root = scope.agents_root.parent / ".pyvenv"
+    exists yet -- the single naming rule shared by ``create`` and ``run``."""
+    pyvenv_root = scope.root / ".pyvenv"
     interpreter = _resolve_interpreter(py_version, logger=logger)
     probed = _probe_version(interpreter)
     version_str = "%d.%d.%d" % probed if probed else "unknown"
     return pyvenv_root / ("%s-%s-%s" % (version_str, _os_bucket(), _arch_bucket(interpreter))), interpreter
 
 
+def _make_venv(target: Path, interpreter: Path, logger) -> None:
+    """``python -m venv``; without pip where the interpreter has no ensurepip."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if subprocess.run([str(interpreter), "-m", "venv", str(target)]).returncode == 0:
+        return
+    logger.warning("venv with pip failed; retrying without pip")
+    shutil.rmtree(target, ignore_errors=True)
+    subprocess.run([str(interpreter), "-m", "venv", "--without-pip", str(target)], check=True)
+
+
 def _ensure_venv(scope, py_version: "Optional[str]", *, dry_run: bool, logger) -> "Optional[Path]":
     """Resolve the venv for ``py_version`` under ``scope``, creating it first if
-    missing -- the one code path both ``pyvenv`` and ``py`` share, so ``py``
-    never drifts from what ``pyvenv`` would have produced for the same inputs.
+    missing -- the one code path both ``create`` and ``run`` share, so ``run``
+    never drifts from what ``create`` would have produced for the same inputs.
     Returns the venv's own python executable, or ``None`` on ``--dry-run`` when
     nothing exists yet (nothing to run against)."""
     target, interpreter = _venv_target(scope, py_version, logger)
     venv_python = _venv_python(target)
 
     if venv_python.is_file():
-        logger.info("pyvenv: exists, nothing to do: %s" % target)
+        logger.info("exists, nothing to do: %s" % target)
         return venv_python
 
-    logger.info("pyvenv: creating %s (from %s)" % (target, interpreter))
+    logger.info("creating %s (from %s)" % (target, interpreter))
     if dry_run:
         logger.info("dry-run: no venv created")
         return None
 
-    try:
-        from dotagents._pyvenv import ensure_venv
-    except ImportError:  # a dotagents older than its scope venvs
-        target.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run([str(interpreter), "-m", "venv", str(target)], check=True)
-    else:
-        # Falls back to --without-pip where the interpreter has no ensurepip.
-        ensure_venv(target, interpreter, logger=logger)
+    _make_venv(target, interpreter, logger)
     if not venv_python.is_file():
         raise SystemExit("error: venv creation reported success but %s is missing" % venv_python)
-    logger.info("pyvenv: created %s" % target)
+    logger.info("created %s" % target)
     return venv_python
 
 
@@ -459,72 +484,65 @@ def _run_target(scope, py_version: "Optional[str]", logger):
     target, _interpreter = _venv_target(scope, py_version, logger)
     if _venv_python(target).is_file():
         return scope
-    from dotagents._scope import Scope
-
-    return Scope("user", scope.user_root, system_root=scope.system_root)
+    return Scope(Path.home(), True)
 
 
-class Pyvenv(DotAgentsArgs):
-    """Create a venv for a Python version in ``<root>/.pyvenv/`` (the project
-    root, or the home directory with ``-g``), once. If the target already looks like a real venv, do nothing --
-    this command is a create-if-missing operation, not an updater.
-
-    Scope (``-g/--global``, ``--agents-dir``) comes from ``DotAgentsArgs`` --
-    same fields, same defaults, same ``resolve_scope`` behind them, as every
-    other scope-aware command (``init``, ``overlays add/remove/sync``): project
-    scope by default, the user store only with an explicit ``-g``."""
+class Pyvenv(LoggingArgs, Cli):
+    """Per-project Python venvs in ``<root>/.pyvenv/``, one per interpreter version."""
 
     _parsername_ = "pyvenv"
 
-    dry_run: bool = False
-    "Show what would happen without creating anything."
-    ("--dry-run",)
+    class _Scoped(Cmd):
+        global_scope: bool = False
+        "Use the user's venvs (~/.pyvenv) instead of the project's."
+        ("--global", "-g")
 
-    py_version: Optional[str] = None
-    ("Python version to use: a full interpreter path, a bare version spec "
-     "(\"3.11\", \"3\"), or omitted for the highest version found on the system.")
-    ("py_version",)
+        py_version: Optional[str] = None
+        ("Python version to use: a full interpreter path, a bare version spec "
+         "(\"3.11\", \"3\"), or omitted for the highest version found on the system.")
+        ("py_version",)
 
-    def __call__(self) -> int:
-        scope = self.resolve_scope()
-        _ensure_venv(scope, self.py_version, dry_run=self.dry_run, logger=self._logger_)
-        return 0
+    class Create(_Scoped):
+        """Create the venv for a Python version, once. If the target already looks
+        like a real venv, do nothing: this is create-if-missing, not an updater."""
+
+        _parsername_ = "create"
+
+        dry_run: bool = False
+        "Show what would happen without creating anything."
+        ("--dry-run",)
+
+        def __call__(self) -> int:
+            _ensure_venv(resolve_scope(self.global_scope), self.py_version,
+                         dry_run=self.dry_run, logger=_LOG)
+            return 0
+
+    class Run(_Scoped):
+        """Run Python in the project's venv for that version when it exists, else
+        the user one (``~/.pyvenv``), created first if missing. Everything after
+        the first literal ``--`` goes to the interpreter untouched.
+
+            pyvenv run -- -c "print(1)"
+            pyvenv run 3.9 -- -m pytest -q
+        """
+
+        _parsername_ = "run"
+
+        def __call__(self) -> int:
+            logger = _LOG
+            scope = _run_target(resolve_scope(self.global_scope), self.py_version, logger)
+            venv_python = _ensure_venv(scope, self.py_version, dry_run=False, logger=logger)
+            if venv_python is None:
+                raise SystemExit("error: venv creation failed; nothing to run")
+            args = list(getattr(self, "_passthrough_", None) or [])
+            if args and args[0] == "--":
+                args = args[1:]
+            return subprocess.run([str(venv_python), *args]).returncode
+
+    _subcommands_ = [Create, Run]
 
 
-class Py(DotAgentsArgs):
-    """Run Python in the project's ``.pyvenv/`` venv for that version when it
-    exists, else the user one (``~/.pyvenv``), created first if it doesn't exist yet
-    (same logic as ``pyvenv`` -- this IS "the venv
-    command and where you run things with it", not a separate lookup).
+if __name__ == "__main__":
+    from duho import main as _duho_main
 
-    Everything after the first literal ``--`` is passed straight through to the
-    subprocess (duho's ``_passthrough_`` convention) -- stdin/stdout/stderr are
-    the real terminal streams, not captured, so interactive input and streamed
-    output both work exactly like invoking python directly.
-
-        dotagents py -- -c "print(1)"      # -> python<selected> -c "print(1)"
-        dotagents py 3.9 -- -m pytest -q   # pick a version explicitly, then run it
-
-    ``--version``/``py_version`` before ``--`` picks which interpreter (same
-    spec as ``pyvenv``'s positional: a bare "3.11"/"3", a full interpreter path,
-    or omitted for latest); everything from the FIRST ``--`` on belongs to the
-    subprocess, including any ``-v``/``-q`` python would otherwise try to
-    consume as its own flags -- they are never parsed by duho once past ``--``.
-    """
-
-    _parsername_ = "py"
-
-    py_version: Optional[str] = None
-    ("Python version to use: a full interpreter path, a bare version spec "
-     "(\"3.11\", \"3\"), or omitted for the highest version found on the system.")
-    ("py_version",)
-
-    def __call__(self) -> int:
-        scope = _run_target(self.resolve_scope(), self.py_version, self._logger_)
-        venv_python = _ensure_venv(scope, self.py_version, dry_run=False, logger=self._logger_)
-        # `_ensure_venv` only returns None on dry_run, which this command never
-        # sets -- but guard anyway rather than pass None to subprocess.
-        if venv_python is None:
-            raise SystemExit("error: venv creation failed; nothing to run")
-        proc = subprocess.run([str(venv_python), *self._passthrough_])
-        return proc.returncode
+    raise SystemExit(_duho_main(Pyvenv))
