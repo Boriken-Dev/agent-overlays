@@ -38,3 +38,34 @@ repo = "owner/name"
 # closed_statuses = ["done", "processed"]   # moving to one of these closes the issue; moving out reopens it
 # command = "gh"                # the program, when it is not `gh` on PATH
 ```
+
+GitLab is the same through `glab` (its REST API, so the person's `glab auth login` is the credential); `kind = "mr"` makes the
+records merge requests:
+
+```toml
+[findings]
+provider = "gitlab"
+project = "group/name"      # a path with its groups
+```
+
+Jira reads one environment variable for its credential and moves a record by the issue's workflow transition whose target is
+the status `status_map` names; a Jira status with no entry reads as its own lower-cased name. With `user` (or `user_env`) the
+token is an API token for basic authentication, without it a bearer token. `flavor = "server"` uses the older search path
+of Jira Server and Data Center.
+
+```toml
+[plans]
+provider = "jira"
+url = "https://example.atlassian.net"
+project = "PRJ"
+token_env = "JIRA_API_TOKEN"     # the NAME of the variable that holds the token; never the token
+user = "me@example.com"          # or user_env = "JIRA_USER"
+# issue_type = "Task"
+default_status = "draft"
+[plans.status_map]
+draft = "To Do"
+executing = "In Progress"
+done = "Done"
+```
+
+The Jira fields block is a `{code:records}` block at the top of the description, so it shows as code in Jira.

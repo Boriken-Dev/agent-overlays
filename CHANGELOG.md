@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - engineering: `records` can keep a folder's records in GitHub issues or pull requests instead of Markdown files
   (`.agents/records.toml`, `provider = "github"`): the issue number is the record's name, a `status:<status>` label its status,
   and the other frontmatter fields a block at the top of the issue's text. It runs through the person's own `gh` login.
+  GitLab issues and merge requests (`provider = "gitlab"`, through `glab api`) and Jira issues (`provider = "jira"`, REST, the
+  token from the environment variable `token_env` names) work the same way.
 - engineering: `lib/python/agent_tools.py`, the reader of the two agent-tools files (`<project>/.agents/agent-tools.toml`, the
   machine's `agent-tools.local.toml`; unknown keys refused with file and key) and the one commit-message rule: no
   `Co-Authored-By:` naming a model or an assistant, no `*-Session:` trailer, no session URL, no "Generated with" footer.
