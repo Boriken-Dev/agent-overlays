@@ -4,7 +4,7 @@
 
 | File | What it does |
 | --- | --- |
-| `build.py` | The deps branch (vendored crates, pub packages, CDN files), the archive and binary scan, the SDK lock, offline and release builds, Flutter helpers |
+| `build.py` | The deps branch (vendored crates, pub packages, CDN files), the archive and binary scan, the SDK lock, offline and release builds, container builds from the deps branch, Flutter helpers |
 | `public_api.py` | Checks or rewrites the public API snapshots of Rust crates |
 | `apk.py` | Checks a built Android APK: forbidden strings, permissions, ABIs, required libraries |
 
@@ -116,6 +116,94 @@ version column is the group that needs it), and no version floats (`latest`, `st
 - `release verify` checks with `file` that each Linux binary in `dist/` is statically linked.
 
 A workflow runs `release matrix`, builds each target on its runner, and uploads `dist/`.
+
+## Container builds (`container`, `.env`)
+
+A repository with a deps branch builds in a container whose network is off: the SDK stage installs the toolchain online
+from pinned bases, then `build` and `test` copy the deps branch in and run cargo with `--network=none`. The template is
+`repo/packaging/container/Containerfile.rust` (stages `sdk`, `build`, `test`, `runtime`; a library deletes `runtime`);
+`repo/.env.example` lists every key a repository can override. Copy both, replace the placeholders (`PACKAGE`, `BINARY`, the
+digests, the workspace's directories), and hold the pins to the lock with `[[sdk.agree]]` rules:
+
+```toml
+[container]
+base_item = "release rust-image"
+runtime_item = "release debian-image"
+
+[[sdk.agree]]
+item = "release rust-image"
+file = "packaging/container/Containerfile"
+pattern = '^ARG BASE_IMAGE=docker\.io/library/rust:([^@\s]+)@sha256:[0-9a-f]{64}$'
+
+[[sdk.agree]]
+item = "release rust-image"
+file = "packaging/container/Containerfile"
+pattern = '^ARG BASE_IMAGE=docker\.io/library/rust:[^@\s]+@sha256:([0-9a-f]{64})$'
+expect = "{sha256}"
+
+[[sdk.agree]]
+item = "release debian-image"
+file = "packaging/container/Containerfile"
+pattern = '^ARG RUNTIME_IMAGE=docker\.io/library/debian:([^@\s]+)@sha256:[0-9a-f]{64}$'
+
+[[sdk.agree]]
+item = "release debian-image"
+file = "packaging/container/Containerfile"
+pattern = '^ARG RUNTIME_IMAGE=docker\.io/library/debian:[^@\s]+@sha256:([0-9a-f]{64})$'
+expect = "{sha256}"
+
+[[sdk.agree]]
+item = "core rust"
+file = "packaging/container/Containerfile"
+pattern = '^ARG RUST_VERSION=(\S+)$'
+first = true
+
+[[sdk.agree]]
+item = "core rustup-init"
+file = "packaging/container/Containerfile"
+pattern = '^ARG RUSTUP_VERSION=(\S+)$'
+first = true
+
+[[sdk.agree]]
+item = "core rustup-init"
+file = "packaging/container/Containerfile"
+pattern = '^ARG RUSTUP_INIT_SHA256_X86_64=([0-9a-f]{64})$'
+platform = "linux-x64"
+expect = "{sha256}"
+
+[[sdk.agree]]
+item = "core rustup-init"
+file = "packaging/container/Containerfile"
+pattern = '^ARG RUSTUP_INIT_SHA256_AARCH64=([0-9a-f]{64})$'
+platform = "linux-arm64"
+expect = "{sha256}"
+```
+
+- `container build [--target STAGE] [--tag T]` and `container test` read the settings (below), fetch the deps commit the lock's
+  `deps crates` row names (from that row's URL, into `[container] work_dir`, checked against `Cargo.lock`), and run
+  `ENGINE build --file F --target S --tag T [--platform P] --build-context deps=DIR --build-context ca=DIR --build-arg ... --label ... CONTEXT`.
+  `container test` builds `[container] test_stage`. The deps checkout is a build context rather than a `COPY` of the repository,
+  so no `.git`, no `target/` and no other branch enters the build. Docker and Podman take the same line: one `--build-arg` for
+  each key, never `--build-arg-file`.
+- `--print` prints the effective non-default settings first, then the deps checkout, then the command, fetching and running
+  nothing; `--json` prints the same as JSON. Neither needs an engine. `[container] file`, `context` and `name` fall back to
+  `[release.image]`.
+- The image carries `org.opencontainers.image.revision` (the repository's `HEAD`), `build.py.deps-commit` and
+  `build.py.non-default` (the names of the keys that differ from the lock, never their values).
+- **The settings** are read, later wins, from `.env`, `.env.local`, the process environment (known keys only) and
+  `--env KEY=VALUE`. `.env` and `.env.local` are ignored by git; `.env.example` is committed. A key that is not in the
+  catalogue (`build.py help env`) is an error naming the file and line; an empty value clears a key. `.env` is read by
+  `container` only, so another tool's `.env` in the same directory breaks nothing else.
+- Every key is a source or a location: mirrors for rustup (`RUSTUP_DIST_SERVER`, `RUSTUP_UPDATE_ROOT`,
+  `RUSTUP_INIT_BASE_URL`) and the package archive (`APT_MIRROR`); `BASE_IMAGE` and `RUNTIME_IMAGE`, which need an
+  `@sha256:` digest unless `ALLOW_UNPINNED_IMAGE=1`; `DEPS_DIR`, or `DEPS_GIT_URL` and `DEPS_REF` (a commit other than the
+  lock's is read file by file against `Cargo.lock`); `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and `EXTRA_CA_CERT` for the SDK
+  stage only; `CONTAINER_ENGINE` and `CONTAINER_PLATFORM`. A version or a hash is overridden only as `RUSTUP_VERSION` with both
+  `RUSTUP_INIT_SHA256_*` keys; the Containerfile checks rustup-init against its hash whatever mirror serves it.
+- A key whose value carries credentials (a proxy, a mirror with a user) goes to the engine as `--build-arg KEY` with the
+  value in the engine's environment: it is on no command line and in no output, and a URL printed anywhere has its user and
+  password replaced.
+- Nothing proprietary goes in an image: Microsoft's compilers and SDK files are never baked in or committed.
 
 ## `public_api.py` and `apk.py`
 

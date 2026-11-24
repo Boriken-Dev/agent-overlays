@@ -8,7 +8,7 @@ consumer reads folders and `catalog.toml` straight from the repository.
 | Path | Responsibility |
 | --- | --- |
 | `overlays/<name>/` | One overlay: `overlay.cfg`, its `icon.png`, and the knowledge, commands, templates and tests it brings. Its own `AGENTS.md` or `kb/` describes it |
-| `overlays/release/repo/tools/` | The shared repository tools (`build.py`, `public_api.py`, `apk.py`): each is copied verbatim into a repo's `tools/` and configured by its `tools/build.cfg`; line 3 of each names this repository and the commit it was copied at. `overlays/release/kb/BUILD.md` says how to adopt and update them |
+| `overlays/release/repo/tools/` | The shared repository tools (`build.py`, `public_api.py`, `apk.py`): each is copied verbatim into a repo's `tools/` and configured by its `tools/build.cfg`; line 3 of each names this repository and the commit it was copied at. `overlays/release/kb/BUILD.md` says how to adopt and update them. `overlays/release/repo/packaging/container/Containerfile.rust` and `overlays/release/repo/.env.example` are the container-build template and its override keys, adapted per repository (BUILD.md "Container builds") |
 | `overlays/engineering/lib/python/`, `cmds/` | The agent-tools configuration reader and commit-message rule (`agent_tools.py`) and the commands built on it (`build-slot`, `gate`, `merge`, `worktrees`, `configure-pages`); `kb/AGENT_TOOLS.md` is their reference. `overlays/release/bin/repo_guard.py` is `repo-guard`, which imports the same reader |
 | `catalog.toml` | The catalog: one full entry per overlay, with a relative source and the `about` fields a store shows |
 | `tools/make_icons.py` | Draws every `icon.png` (standard library only, deterministic); `--check` fails when one is stale |
