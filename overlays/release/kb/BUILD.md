@@ -35,7 +35,10 @@ copy that must change is changed in this repository and updated.
 
 `deps` keeps an orphan branch (default `deps`) equal to `Cargo.lock`: `crates/` is a cargo vendor directory with one
 `NAME-VERSION/` per package, from crates.io or git, each with a `.cargo-checksum.json`. Tests, examples, benchmarks,
-fixtures and dot-directories are left out; a binary a build reads is written as hex or as an array literal; the markers of a
+fixtures, `doc`, `docs`, `ci` and dot-directories are left out, and so are container files (`Containerfile`, `Dockerfile*`,
+`.dockerignore`, compose files) and, at a package's top, developer scripts (`*.sh`, `*.bat`, `*.cmd`, `*.ps1`) and tool
+dotfiles (`.editorconfig`, `.travis.yml`, `justfile`, `flake.nix`, ...); a file a kept source includes by path stays, and
+`deps sync` re-writes a package already on the branch that holds a file these rules now leave out; a binary a build reads is written as hex or as an array literal; the markers of a
 PEM private key are defanged; nothing an archive scanner would refuse stays. `manifest.json` records the format, the source
 commit and the SHA-256 of `Cargo.lock`, and the checks read it.
 

@@ -329,6 +329,45 @@ def test_a_file_a_kept_source_includes_stays_even_from_a_dropped_directory(build
     assert "examples/readme.txt" in names and "examples/other.txt" not in names
 
 
+def test_container_files_scripts_and_developer_dotfiles_are_not_vendored(build, tmp_path):
+    files = {
+        "Cargo.toml": b'[package]\nname = "dep"\n',
+        "src/lib.rs": b"",
+        "LICENSE": b"licence\n",
+        "README.md": b"readme\n",
+        "Containerfile": b"FROM scratch\n",
+        "Dockerfile.dev": b"FROM scratch\n",
+        "tools/Dockerfile": b"FROM scratch\n",
+        ".dockerignore": b"target\n",
+        "docker-compose.yml": b"x: 1\n",
+        "regenerate_bindings.sh": b"#!/bin/sh\n",
+        "release.ps1": b"x\n",
+        ".travis.yml": b"x: 1\n",
+        ".editorconfig": b"root = true\n",
+        "justfile": b"x:\n",
+        "docs/guide.md": b"x\n",
+        "doc/x.md": b"x\n",
+        "ci/run.sh": b"x\n",
+        "src/helper.sh": b"x\n",
+    }
+    target = tmp_path / "dep-1.0.0"
+    build.write_package(target, files, None)
+    names = {p.relative_to(target).as_posix() for p in target.rglob("*") if p.is_file()}
+    # A script below the top is source the crate may run, so only the top-level ones go.
+    assert names == {"Cargo.toml", "src/lib.rs", "LICENSE", "README.md", "src/helper.sh", build.CHECKSUM}
+
+
+def test_a_container_file_a_kept_source_includes_stays(build, tmp_path):
+    files = {
+        "Cargo.toml": b'[package]\nname = "dep"\n',
+        "src/lib.rs": b'pub const T: &str = include_str!("../Containerfile");\n',
+        "Containerfile": b"FROM scratch\n",
+    }
+    target = tmp_path / "dep-1.0.0"
+    build.write_package(target, files, None)
+    assert (target / "Containerfile").is_file()
+
+
 def test_include_bytes_of_a_test_only_file_or_the_big_endian_table_is_left_alone(build):
     kept = {"src/lib.rs": b'a(include_bytes!("t.bigendian.bin")); b(include_bytes!("x.bin"));'}
     files = {**kept, "src/t.bigendian.bin": b"\xff" * 4, "src/x.bin": b"\x01\xff"}
@@ -645,6 +684,39 @@ def test_a_stale_package_is_removed_by_sync(build, registry, tmp_path):
     vendored(build, deps / "crates", "gone-1.0.0", "c" * 64)
     assert build.main(["--root", str(root), "deps", "sync", "--deps", str(deps)]) == 0
     assert not (deps / "crates" / "gone-1.0.0").exists() and (deps / "crates" / "dep-1.2.3").is_dir()
+
+
+def test_sync_trims_a_package_vendored_before_a_file_was_dropped_and_then_settles(build, registry, tmp_path):
+    root, _, fetched = registry
+    ctx_for(build, root)
+    commit_all(root)
+    deps = tmp_path / "main-deps"
+    deps.mkdir()
+    assert build.main(["--root", str(root), "deps", "sync", "--deps", str(deps)]) == 0
+    folder = deps / "crates" / "dep-1.2.3"
+    # What an older tool left: a Containerfile, listed in the checksum like any other file.
+    (folder / "Containerfile").write_bytes(b"FROM scratch\n")
+    sums = json.loads((folder / build.CHECKSUM).read_text())
+    sums["files"]["Containerfile"] = build.sha256(b"FROM scratch\n")
+    (folder / build.CHECKSUM).write_text(json.dumps(sums, separators=(",", ":")), encoding="utf-8")
+    assert build.main(["--root", str(root), "deps", "check", "--deps", str(deps)]) == 0, "an untrimmed package is not a check failure"
+    assert build.main(["--root", str(root), "deps", "sync", "--deps", str(deps)]) == 0
+    assert not (folder / "Containerfile").exists() and len(fetched) == 2
+    assert build.main(["--root", str(root), "deps", "sync", "--deps", str(deps)]) == 0
+    assert len(fetched) == 2, "a trimmed package is current"
+
+
+def test_sync_leaves_a_package_alone_whose_dropped_looking_file_a_source_includes(build, tmp_path):
+    folder = tmp_path / "crates"
+    files = {
+        "Cargo.toml": b'[package]\nname = "dep"\n',
+        "src/lib.rs": b'pub const T: &str = include_str!("../docs/x.md");\n',
+        "docs/x.md": b"x\n",
+    }
+    build.write_package(folder / "dep-1.0.0", files, None)
+    tree = build.read_dir(folder)
+    assert (folder / "dep-1.0.0" / "docs" / "x.md").is_file()
+    assert build.untrimmed(folder, tree, "dep-1.0.0") is False
 
 
 def test_sync_refuses_a_directory_this_tool_did_not_make(build, registry, tmp_path, capsys):

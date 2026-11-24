@@ -548,6 +548,15 @@ DROP_TOP = {
     "testdata", "test-data", "test_data", "fixture", "fixtures",
 }  # fmt: skip
 DROP_ANY = {"testdata", "test-data", "test_data", "fixture", "fixtures"}
+# What only a person working on the crate reads: documentation and CI directories at its top.
+DROP_TOP |= {"doc", "docs", "ci"}
+# Container files at any depth, and at the top of a package its developer scripts and tool dotfiles.
+DEV_ANYWHERE = re.compile(r"^(containerfile|dockerfile)(\..+)?$|^\.dockerignore$|^docker-compose.*\.ya?ml$", re.IGNORECASE)
+DEV_TOP = re.compile(
+    r".+\.(sh|bat|cmd|ps1)$|^(justfile|flake\.nix|flake\.lock)$"
+    r"|^\.(editorconfig|envrc|ignore|travis\.ya?ml|codecov\.ya?ml|gitlab-ci\.ya?ml|appveyor\.ya?ml)$",
+    re.IGNORECASE,
+)
 INCLUDE = re.compile(r'include_(?:str|bytes)!\s*\(\s*"([^"]+)"\s*,?\s*\)|\binclude!\s*\(\s*"([^"]+)"\s*,?\s*\)')
 INCLUDE_BYTES = re.compile(r'(\*\s*)?include_bytes!\s*\(\s*"([^"]+)"\s*,?\s*\)')
 # A source file only tests, fuzzing or benchmarks compile; what it includes is not worth carrying.
@@ -933,6 +942,8 @@ def keeps(path: str) -> bool:
     if dirs and dirs[0].lower() in DROP_TOP:
         return False
     if any(d.lower() in DROP_ANY or d.startswith(".") for d in dirs):
+        return False
+    if DEV_ANYWHERE.match(name) or (not dirs and DEV_TOP.match(name)):
         return False
     return not (name.startswith(".git") or name == ".cargo-ok")
 
@@ -1330,6 +1341,15 @@ def materialize_repo(repo: Repo, wanted: list[tuple[str, str]], crates: Path) ->
             write_package(crates / f"{name}-{version}", files, None)
 
 
+def untrimmed(crates: Path, tree: Tree, name: str) -> bool:
+    """Whether a package on disk holds a file the current rules leave out and no kept source includes."""
+    present = [p for p in tree.dirs.get(name, {}) if p != CHECKSUM]
+    if all(keeps(p) for p in present):
+        return False
+    files = {p: (crates / name / p).read_bytes() for p in present}
+    return set(include_closure(files)) != set(files)
+
+
 def sync_crates(deps_dir: Path, lock: Lock, template: str, jobs: int) -> list[str]:
     """Makes deps_dir/crates cover the lock and hold nothing else; returns a line per change."""
     crates = deps_dir / "crates"
@@ -1345,7 +1365,7 @@ def sync_crates(deps_dir: Path, lock: Lock, template: str, jobs: int) -> list[st
     for name in sorted(set(tree.dirs) - set(wanted)):
         shutil.rmtree(crates / name)
         changes.append(f"removed {name}")
-    stale = {n for n, (c, r) in wanted.items() if package_problems(tree, n, c, r)}
+    stale = {n for n, (c, r) in wanted.items() if package_problems(tree, n, c, r) or untrimmed(crates, tree, n)}
     crate_jobs = [c for c in lock.crates if c.dir in stale]
     repo_jobs = [(r, p) for r, p in lock.repos.items() if any(f"{n}-{v}" in stale for n, v in p)]
     with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
