@@ -2839,8 +2839,9 @@ def unpack(archive: Path, dest: Path, strip: int = 1) -> None:
 class Installer:
     """What `sdk install` does for one platform, prefix and set of groups."""
 
-    def __init__(self, ctx: Ctx, items: list[Item], plat: str, prefix: Path, groups: list[str], check: bool) -> None:
+    def __init__(self, ctx: Ctx, items: list[Item], plat: str, prefix: Path, groups: list[str], check: bool, native: dict[str, tuple[str, str]] | None = None) -> None:
         self.ctx, self.plat, self.prefix, self.groups, self.check = ctx, plat, prefix, groups, check
+        self.native = native or {}
         self.windows = plat.startswith("windows")
         self.triple = TRIPLES[plat]
         self.missing = False
@@ -2982,7 +2983,7 @@ class Installer:
     # clang for ring on Windows ARM64
     def clang_dir(self) -> Path | None:
         """None when a clang is already on PATH or Visual Studio has one; else the locked LLVM's."""
-        if shutil.which("clang"):
+        if shutil.which("clang") or "LLVM_DIR" in self.native:
             return None
         vswhere = Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
         if vswhere.is_file():
@@ -3135,6 +3136,11 @@ class Installer:
             return bool(shutil.which("docker") or shutil.which("podman"))
         if name == "python3":
             return bool(shutil.which("python3") or shutil.which("python") or shutil.which("py"))
+        if name == "windows-sdk" and "WINDOWSSDKDIR" in self.native:
+            return True
+        if name.startswith("Microsoft.VisualStudio.") and "VSINSTALLDIR" in self.native:
+            # A directory the user names replaces vswhere; the build proves which components it has.
+            return True
         if name == "windows-sdk":
             kits = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / "Windows Kits" / "10" / "Include"
             return kits.is_dir()
@@ -3169,12 +3175,14 @@ class Installer:
     def write_env(self) -> None:
         cfg = self.ctx.cfg.sdk
         variables = {"BUILD_SDK_HOME": str(self.prefix)}
+        native, directories = native_environment(self.native)
+        variables.update(native)
         if self.rustup.is_file():
             variables["RUSTUP_HOME"] = str(self.rustup_home)
             variables["CARGO_HOME"] = str(self.cargo_home)
         for key, value in cfg.env.items():
             variables[key] = self.expand(value)
-        paths = [self.expand(p) for p in cfg.path] + [p for p in reversed(self.paths)]
+        paths = directories + [self.expand(p) for p in cfg.path] + [p for p in reversed(self.paths)]
         paths = [p for p in dict.fromkeys(paths) if Path(p).exists()]
         for value in [*variables.values(), *paths]:
             if "'" in value:
@@ -3217,12 +3225,21 @@ def sdk_install(ctx: Ctx, args: argparse.Namespace) -> int:
     items, errors = lint_lock(ctx, path.read_bytes(), path.name)
     if errors:
         raise Problem("\n".join(errors[:5]) + (f"\n({len(errors)} problems in all; run `sdk check`)" if len(errors) > 5 else ""))
-    prefix = Path(args.prefix) if args.prefix else Path(os.environ["BUILD_SDK_HOME"]) if os.environ.get("BUILD_SDK_HOME") else Path.home() / f".{ctx.root.name}-sdk"
+    native = native_settings(ctx, os.environ, getattr(args, "env", None) or [])
+    if args.prefix:
+        prefix = Path(args.prefix)
+    elif "SDK_HOME" in native:
+        prefix = Path(native["SDK_HOME"][0])
+    else:
+        prefix = Path(os.environ["BUILD_SDK_HOME"]) if os.environ.get("BUILD_SDK_HOME") else Path.home() / f".{ctx.root.name}-sdk"
     prefix = prefix.resolve() if prefix.is_absolute() else (Path.cwd() / prefix).resolve()
-    install = Installer(ctx, items, plat, prefix, groups + ["system"], args.check)
+    install = Installer(ctx, items, plat, prefix, groups + ["system"], args.check, native)
     if not args.check:
         (prefix / "dl").mkdir(parents=True, exist_ok=True)
-    install.report("prefix", str(prefix))
+    install.report("prefix", str(prefix) + (f" (SDK_HOME, {native['SDK_HOME'][1]})" if "SDK_HOME" in native and not args.prefix else ""))
+    for key in NATIVE_VARIABLES:
+        if key in native:
+            install.report(key, f"{native[key][0]} ({native[key][1]})")
     install.report("platform", plat)
     install.rust()
     install.llvm()
@@ -3246,10 +3263,11 @@ def add_sdk(sub: argparse._SubParsersAction) -> None:
     check.set_defaults(run=sdk_check)
     install = commands.add_parser("install", help="install what the lock names under one prefix, verified, by version")
     install.add_argument("--groups", metavar="A,B", help="the groups to install (default: [sdk] install)")
-    install.add_argument("--prefix", metavar="DIR", help="where (default: $BUILD_SDK_HOME, else ~/.REPO-sdk)")
+    install.add_argument("--prefix", metavar="DIR", help="where (default: SDK_HOME of `help env`, else $BUILD_SDK_HOME, else ~/.REPO-sdk)")
     install.add_argument("--check", action="store_true", help="install nothing: report what is missing and exit 1 if anything is")
     install.add_argument("--print-system", action="store_true", help="print the system packages to install, and nothing else")
     install.add_argument("--platform", metavar="OS-ARCH", help="act as this platform (default: this machine, or $BUILD_SDK_PLATFORM)")
+    install.add_argument("--env", action="append", metavar="KEY=VALUE", help="set a native key of `help env` (SDK_HOME, VSINSTALLDIR, LLVM_DIR, ...); wins over the environment and the .env files")
     install.set_defaults(run=sdk_install)
 
 
@@ -3418,6 +3436,14 @@ def release_build(ctx: Ctx, args: argparse.Namespace) -> int:
     name = archive_name(ctx, target.triple, target.archive)
     config = None
     env = dict(os.environ)
+    native = native_settings(ctx, os.environ, getattr(args, "env", None) or [])
+    variables, directories = native_environment(native)
+    env.update(variables)
+    if directories:
+        env["PATH"] = os.pathsep.join([*directories, env.get("PATH", "")])
+    for key in NATIVE_KEYS:
+        if key in native and key != "SDK_HOME":
+            print(f"native: {key}={native[key][0]} ({native[key][1]})")
     if args.offline:
         lock_path = args.cargo_lock.resolve() if args.cargo_lock else ctx.root / ctx.cfg.deps.cargo_lock
         info = use_crates(ctx, find_deps(ctx, args.deps), read_lock(lock_path), lock_path, args.out)
@@ -3560,6 +3586,7 @@ def add_release(sub: argparse._SubParsersAction) -> None:
     build_.add_argument("--deps", type=Path, metavar="DIR", help="the deps checkout for --offline (default: `deps path`)")
     build_.add_argument("--cargo-lock", type=Path, metavar="FILE", help="read this Cargo.lock for --offline")
     build_.add_argument("--out", type=Path, metavar="DIR", help="where --offline writes the cargo home")
+    build_.add_argument("--env", action="append", metavar="KEY=VALUE", help="set a native key of `help env` (VSINSTALLDIR, LIBCLANG_PATH, ...); wins over the environment and the .env files")
     build_.set_defaults(run=release_build)
     universal = commands.add_parser("universal", help="join the two built Apple targets with lipo and pack the result")
     universal.set_defaults(run=release_universal)
@@ -3592,6 +3619,14 @@ class EnvKey(NamedTuple):
     doc: str
     by_name: bool = False
     arg: bool = True
+    # Glob patterns, each of which must match something in a `dir`: what makes the directory the one meant.
+    need: tuple[str, ...] = ()
+
+
+# Keys for a build on this machine (`sdk install`, `release build`): where Visual Studio, the Windows SDK, clang and the SDK
+# prefix are. The container build reports them when set and ignores them.
+NATIVE_KEYS = ("VSINSTALLDIR", "VCTOOLSINSTALLDIR", "WINDOWSSDKDIR", "WINDOWSSDKVERSION", "LIBCLANG_PATH", "LLVM_DIR", "SDK_HOME")
+NATIVE_VARIABLES = tuple(key for key in NATIVE_KEYS if key != "SDK_HOME")
 
 
 ENV_KEYS: dict[str, EnvKey] = {
@@ -3615,6 +3650,39 @@ ENV_KEYS: dict[str, EnvKey] = {
     "EXTRA_CA_CERT": EnvKey("file", "A PEM file added to the SDK stage's trust store, never to the runtime image."),
     "CONTAINER_ENGINE": EnvKey("engine", "podman or docker; default: [release.image] tool, else podman when found, else docker.", arg=False),
     "CONTAINER_PLATFORM": EnvKey("str", "The engine's --platform, for example linux/arm64.", arg=False),
+    "MSVC_SPLAT_DIR": EnvKey(
+        "dir",
+        "An xwin-style splat of the MSVC CRT and the Windows SDK (crt/ and sdk/) for the Containerfile's cross stage, which mounts it read-only as the `msvc` build context. Microsoft licenses these files: they are never copied into an image layer that is kept or into the repository.",
+        arg=False,
+        need=("crt", "sdk"),
+    ),
+    "VSINSTALLDIR": EnvKey(
+        "dir",
+        "Native builds: the Visual Studio or Build Tools root, used instead of vswhere to find MSVC, and set for cargo (the cc crate reads it).",
+        arg=False,
+        need=("VC",),
+    ),
+    "VCTOOLSINSTALLDIR": EnvKey(
+        "dir",
+        "Native builds: the MSVC toolset directory (VC/Tools/MSVC/VERSION), set for cargo.",
+        arg=False,
+        need=("bin", "include", "lib"),
+    ),
+    "WINDOWSSDKDIR": EnvKey(
+        "dir",
+        "Native builds: the Windows SDK root (Windows Kits/10), used instead of the default location, and set for cargo.",
+        arg=False,
+        need=("Include", "Lib"),
+    ),
+    "WINDOWSSDKVERSION": EnvKey("sdkversion", "Native builds: the Windows SDK version (for example 10.0.26100.0), set for cargo; with WINDOWSSDKDIR it must be installed there.", arg=False),
+    "LIBCLANG_PATH": EnvKey("dir", "Native builds: the directory of libclang (bindgen, clang-sys), set for cargo.", arg=False, need=("libclang.*",)),
+    "LLVM_DIR": EnvKey(
+        "dir",
+        "Native builds: an LLVM installation (bin/clang): its bin comes first on PATH, `sdk install` fetches no LLVM, and LIBCLANG_PATH defaults to its bin when that holds libclang.",
+        arg=False,
+        need=("bin/clang*",),
+    ),
+    "SDK_HOME": EnvKey("home", "Native builds: where `sdk install` puts the SDKs (after --prefix, before $BUILD_SDK_HOME).", arg=False),
 }
 
 
@@ -3653,35 +3721,39 @@ def parse_env_text(text: str, name: str) -> tuple[list[tuple[int, str, str]], li
     return rows, errors
 
 
-def read_env(ctx: Ctx, environ: Any, flags: list[str]) -> dict[str, tuple[str, str]]:
+def read_env(ctx: Ctx, environ: Any, flags: list[str], only: tuple[str, ...] | None = None) -> dict[str, tuple[str, str]]:
     """{key: (value, where it came from)}: .env, then .env.local, then the process environment, then --env.
 
     A later layer wins. An unknown key in a file or a flag is refused, naming it; the environment is
     read for the known keys only. An empty value clears the key, which leaves the default.
+
+    `only` is for a command that uses some keys (a native build): it reads those and leaves the rest of the
+    files and flags alone, so a key of another tool in the same `.env` breaks nothing there.
     """
     values: dict[str, tuple[str, str]] = {}
     errors: list[str] = []
+    wanted = ENV_KEYS if only is None else only
     for name in ENV_FILES:
         path = ctx.root / name
         if not path.is_file():
             continue
         rows, bad = parse_env_text(path.read_text(encoding="utf-8"), name)
-        errors += bad
+        errors += bad if only is None else []
         for number, key, value in rows:
-            if key in ENV_KEYS:
+            if key in wanted:
                 values[key] = (value, name)
-            else:
+            elif only is None:
                 errors.append(f"{name}:{number}: unknown key {key}; `build.py help env` lists the keys")
-    for key in ENV_KEYS:
+    for key in wanted:
         if key in environ:
             values[key] = (environ[key], "environment")
     for flag in flags:
         key, eq, value = flag.partition("=")
-        if eq and key in ENV_KEYS:
+        if eq and key in wanted:
             values[key] = (value, "--env")
-        elif eq:
+        elif eq and only is None:
             errors.append(f"--env {key}: unknown key; `build.py help env` lists the keys")
-        else:
+        elif not eq:
             errors.append(f"--env {flag}: not KEY=VALUE")
     if errors:
         raise Problem("\n".join(errors))
@@ -3717,10 +3789,20 @@ def env_problems(values: dict[str, tuple[str, str]]) -> list[str]:
             found.append(f"{where}: must be podman or docker: {value}")
         elif kind == "dir" and not Path(value).is_dir():
             found.append(f"{where}: {value} is not a directory")
+        elif kind == "dir" and (missing := [n for n in ENV_KEYS[key].need if not any(Path(value).glob(n))]):
+            found.append(f"{where}: {value} holds no {', no '.join(missing)}, so it is not the directory meant")
+        elif kind == "home" and Path(value).exists() and not Path(value).is_dir():
+            found.append(f"{where}: {value} exists and is not a directory")
+        elif kind == "sdkversion" and not re.fullmatch(r"\d+\.\d+\.\d+\.\d+[\\/]?", value):
+            found.append(f"{where}: not a Windows SDK version (for example 10.0.26100.0): {value}")
         elif kind == "file" and not Path(value).is_file():
             found.append(f"{where}: {value} is not a file")
         elif kind == "image" and not PINNED_IMAGE.search(value) and not allowed:
             found.append(f"{where}: {hide_credentials(value)} has no @sha256: digest; pin it, or set ALLOW_UNPINNED_IMAGE=1 and accept that the build is not reproducible")
+    if "WINDOWSSDKVERSION" in values and "WINDOWSSDKDIR" in values:
+        version = values["WINDOWSSDKVERSION"][0].rstrip("\\/")
+        if not (Path(values["WINDOWSSDKDIR"][0]) / "Lib" / version).is_dir():
+            found.append(f"WINDOWSSDKVERSION ({values['WINDOWSSDKVERSION'][1]}): {version} is not installed under {values['WINDOWSSDKDIR'][0]} (WINDOWSSDKDIR, {values['WINDOWSSDKDIR'][1]})")
     if "DEPS_DIR" in values:
         found += [f"DEPS_DIR and {other} are exclusive" for other in ("DEPS_GIT_URL", "DEPS_REF") if other in values]
     versions = {"RUSTUP_VERSION", "RUSTUP_INIT_SHA256_X86_64", "RUSTUP_INIT_SHA256_AARCH64"}
@@ -3728,6 +3810,31 @@ def env_problems(values: dict[str, tuple[str, str]]) -> list[str]:
     if given and given != versions:
         found.append(f"{', '.join(sorted(given))} given without {', '.join(sorted(versions - given))}: a rustup version and both its hashes go together")
     return found
+
+
+def native_settings(ctx: Ctx, environ: Any, flags: list[str]) -> dict[str, tuple[str, str]]:
+    """The native keys (NATIVE_KEYS) of .env, .env.local, the environment and --env, each checked.
+
+    Other keys of those files are left to `container`, so a wrong path fails here naming its key and where it was set."""
+    values = read_env(ctx, environ, flags, only=NATIVE_KEYS)
+    found = env_problems(values)
+    if found:
+        raise Problem("\n".join(found))
+    return values
+
+
+def native_environment(native: dict[str, tuple[str, str]]) -> tuple[dict[str, str], list[str]]:
+    """(variables for cargo and the installed env files, directories to put first on PATH) for native keys.
+
+    LLVM_DIR's bin comes first on PATH and is where libclang is looked for when LIBCLANG_PATH is not set."""
+    variables = {key: native[key][0] for key in NATIVE_VARIABLES if key in native}
+    directories: list[str] = []
+    if "LLVM_DIR" in native:
+        bin_dir = Path(native["LLVM_DIR"][0]) / "bin"
+        directories.append(str(bin_dir))
+        if "LIBCLANG_PATH" not in variables and any(bin_dir.glob("libclang.*")):
+            variables["LIBCLANG_PATH"] = str(bin_dir)
+    return variables, directories
 
 
 SCHEMA["container"] = Key(
@@ -3866,7 +3973,14 @@ def container_plan(ctx: Ctx, args: argparse.Namespace, stage: str, environ: Any,
     defaults = container_defaults(ctx, items)
     notes: list[str] = []
     deps, commit = container_deps(ctx, values, items, fetch, notes)
-    non_default = [(key, hide_credentials(values[key][0]), values[key][1]) for key in ENV_KEYS if key in values and values[key][0] != defaults.get(key)]
+    for key in NATIVE_KEYS:
+        if key in values:
+            notes.append(f"{key} ({values[key][1]}) is for native builds (`sdk install`, `release build`); the container build ignores it")
+    non_default = [
+        (key, hide_credentials(values[key][0]), values[key][1])
+        for key in ENV_KEYS
+        if key in values and key not in NATIVE_KEYS and values[key][0] != defaults.get(key)
+    ]
     for key in ("BASE_IMAGE", "RUNTIME_IMAGE"):
         if key in values and not PINNED_IMAGE.search(values[key][0]):
             notes.append(f"{key} has no digest (ALLOW_UNPINNED_IMAGE=1): the build is not reproducible")
@@ -3874,6 +3988,10 @@ def container_plan(ctx: Ctx, args: argparse.Namespace, stage: str, environ: Any,
     ca_dir = ca_file.parent if ca_file else ctx.root / cfg.work_dir / "ca-empty"
     if ca_file is None and fetch:
         ca_dir.mkdir(parents=True, exist_ok=True)
+    # Always given, empty when MSVC_SPLAT_DIR is unset, so a cross stage built without it fails on its own message.
+    msvc_dir = Path(values["MSVC_SPLAT_DIR"][0]).resolve() if "MSVC_SPLAT_DIR" in values else ctx.root / cfg.work_dir / "msvc-empty"
+    if "MSVC_SPLAT_DIR" not in values and fetch:
+        msvc_dir.mkdir(parents=True, exist_ok=True)
     build_args: list[str] = []
     secrets: dict[str, str] = {}
     for key, spec in ENV_KEYS.items():
@@ -3896,7 +4014,7 @@ def container_plan(ctx: Ctx, args: argparse.Namespace, stage: str, environ: Any,
     command = [engine, "build", "--file", str(ctx.root / file), *(["--target", stage] if stage else []), "--tag", tag]
     if platform or "CONTAINER_PLATFORM" in values:
         command += ["--platform", platform or values["CONTAINER_PLATFORM"][0]]
-    command += ["--build-context", f"deps={deps}", "--build-context", f"ca={ca_dir}", *build_args]
+    command += ["--build-context", f"deps={deps}", "--build-context", f"ca={ca_dir}", "--build-context", f"msvc={msvc_dir}", *build_args]
     for label, text in labels.items():
         command += ["--label", f"{label}={text}"]
     command.append(str((ctx.root / context).resolve()))

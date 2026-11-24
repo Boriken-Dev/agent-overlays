@@ -92,3 +92,47 @@ COPY --from=build /src/target/release/BINARY /usr/local/bin/BINARY
 USER app
 VOLUME /var/lib/app
 ENTRYPOINT ["BINARY"]
+
+# --- optional: x86_64-pc-windows-msvc from Linux ----------------------------------------------------------------
+# Delete these stages when the repository ships no Windows binary. `build.py container build --target cross-out`
+# leaves the program in a scratch image whose only file is the executable (`podman create` and `podman cp`, or
+# `--output`). MSVC_SPLAT_DIR (see .env.example) is the `msvc` build context, mounted read-only for the one RUN that
+# links, so the CRT and the Windows SDK are in no layer: Microsoft licenses them, and they are never copied into an
+# image or the repository. Built with no splat, the stage stops on the first line below that looks for it.
+FROM sdk AS cross-sdk
+ARG CROSS_TARGET=x86_64-pc-windows-msvc
+ARG APT_MIRROR=
+# lld-link and clang-cl link and compile C for the MSVC target; the standard library of the target comes from rustup.
+RUN set -eu; \
+    if [ -n "${APT_MIRROR}" ] && [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+        sed -i -E "s|^(URIs: )https?://deb\.debian\.org/debian$|\1${APT_MIRROR}|" /etc/apt/sources.list.d/debian.sources; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends clang lld; \
+    rm -rf /var/lib/apt/lists/*; \
+    rustup target add "${CROSS_TARGET}"
+
+FROM cross-sdk AS cross
+ARG CROSS_TARGET=x86_64-pc-windows-msvc
+WORKDIR /src
+ENV CARGO_NET_OFFLINE=true
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
+COPY tools/build.py tools/build.cfg tools/sdk.lock tools/
+COPY --from=deps /crates /deps/crates
+RUN --network=none python3 tools/build.py offline plan --deps /deps --out /opt/offline
+# The paths are the splat's own layout (crt/ and sdk/, as xwin writes it); the target's linker and C compiler read them.
+ENV CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=lld-link \
+    CC_x86_64_pc_windows_msvc=clang-cl \
+    AR_x86_64_pc_windows_msvc=llvm-lib \
+    CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS="-C target-feature=+crt-static -Lnative=/mnt/msvc/crt/lib/x86_64 -Lnative=/mnt/msvc/sdk/lib/um/x86_64 -Lnative=/mnt/msvc/sdk/lib/ucrt/x86_64" \
+    CFLAGS_x86_64_pc_windows_msvc="--target=x86_64-pc-windows-msvc -Wno-unused-command-line-argument -fuse-ld=lld-link /imsvc/mnt/msvc/crt/include /imsvc/mnt/msvc/sdk/include/ucrt /imsvc/mnt/msvc/sdk/include/um /imsvc/mnt/msvc/sdk/include/shared"
+RUN --network=none --mount=type=bind,from=msvc,target=/mnt/msvc,readonly \
+    set -eu; \
+    [ -d /mnt/msvc/crt ] && [ -d /mnt/msvc/sdk ] || { echo "MSVC_SPLAT_DIR is not set: see .env.example" >&2; exit 1; }; \
+    cargo --config /opt/offline/cargo-home/config.toml build --release --locked --offline --target "${CROSS_TARGET}" -p PACKAGE; \
+    mkdir /out; \
+    cp "target/${CROSS_TARGET}/release/BINARY.exe" /out/
+
+FROM scratch AS cross-out
+COPY --from=cross /out/ /

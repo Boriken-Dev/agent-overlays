@@ -255,7 +255,8 @@ def expected(
     head = git(root, "rev-parse", "HEAD")
     return [
         engine, "build", "--file", str(root / "packaging/container/Containerfile"), *(["--target", "test"] if target else []), "--tag", tag,
-        *extra, "--build-context", f"deps={deps.resolve()}", "--build-context", f"ca={root / 'target/container/ca-empty'}", *args,
+        *extra, "--build-context", f"deps={deps.resolve()}", "--build-context", f"ca={root / 'target/container/ca-empty'}",
+        "--build-context", f"msvc={root / 'target/container/msvc-empty'}", *args,
         "--label", f"build.py.deps-commit={'unknown'}", "--label", f"org.opencontainers.image.revision={head}",
         "--label", f"build.py.non-default={keys}", str(root.resolve()),
     ]  # fmt: skip
@@ -281,7 +282,7 @@ def test_docker_gets_the_same_arguments_and_no_build_arg_file(build, repo, deps,
     command = report["command"]
     assert command[:2] == ["docker", "build"] and "--build-arg-file" not in command
     assert command == expected(repo, deps, engine="docker", args=("--build-arg", "NO_PROXY=a.example.com"), extra=("--platform", "linux/arm64"), keys="DEPS_DIR,NO_PROXY,CONTAINER_ENGINE,CONTAINER_PLATFORM")
-    assert args_of(command, "--build-context") == [f"deps={deps.resolve()}", f"ca={repo / 'target/container/ca-empty'}"]
+    assert args_of(command, "--build-context") == [f"deps={deps.resolve()}", f"ca={repo / 'target/container/ca-empty'}", f"msvc={repo / 'target/container/msvc-empty'}"]
     assert args_of(command, "--platform") == ["linux/arm64"]
 
 
@@ -479,16 +480,29 @@ def check_sdk(build, root, capsys) -> tuple[int, str]:
 
 def test_the_template_has_the_stages_and_every_build_argument_of_the_catalogue(build):
     text = TEMPLATE.read_text(encoding="utf-8")
-    assert re.findall(r"^FROM \S+ AS (\w+)$", text, re.MULTILINE) == ["sdk", "build", "test", "runtime"]
+    assert re.findall(r"^FROM \S+ AS ([\w-]+)$", text, re.MULTILINE) == ["sdk", "build", "test", "runtime", "cross-sdk", "cross", "cross-out"]
     declared = set(re.findall(r"^ARG ([A-Z0-9_]+)(?:=|$)", text, re.MULTILINE))
     wanted = {key for key, spec in build.ENV_KEYS.items() if spec.arg} - PREDEFINED
     assert wanted <= declared, sorted(wanted - declared)
-    assert declared <= set(build.ENV_KEYS) | {"BASE_IMAGE", "RUNTIME_IMAGE"}, sorted(declared - set(build.ENV_KEYS))
+    assert declared <= set(build.ENV_KEYS) | {"BASE_IMAGE", "RUNTIME_IMAGE", "CROSS_TARGET"}, sorted(declared - set(build.ENV_KEYS))
+
+
+def test_the_cross_stage_mounts_the_msvc_context_read_only_and_never_copies_it(build):
+    text = TEMPLATE.read_text(encoding="utf-8")
+    stages = {m.group(1): m.group(0) for m in re.finditer(r"^FROM \S+ AS ([\w-]+)$.*?(?=^FROM |\Z)", text, re.MULTILINE | re.DOTALL)}
+    cross = stages["cross"]
+    # The splat is in a bind mount of one RUN, which is in no layer; no instruction copies it or names it as a base.
+    assert "--mount=type=bind,from=msvc,target=/mnt/msvc,readonly" in cross
+    assert not re.search(r"^(COPY|ADD)\b.*\bmsvc\b", text, re.MULTILINE)
+    assert not re.search(r"^FROM msvc\b", text, re.MULTILINE)
+    assert "--network=none" in cross and "COPY --from=deps /crates /deps/crates" in cross
+    assert "MSVC_SPLAT_DIR is not set" in cross
+    assert "COPY --from=cross /out/ /" in stages["cross-out"] and stages["cross-out"].startswith("FROM scratch")
 
 
 def test_the_build_and_test_stages_run_every_step_with_no_network_and_the_sdk_stage_checks_the_hash(build):
     text = TEMPLATE.read_text(encoding="utf-8")
-    stages = {m.group(1): m.group(0) for m in re.finditer(r"^FROM \S+ AS (\w+)$.*?(?=^FROM |\Z)", text, re.MULTILINE | re.DOTALL)}
+    stages = {m.group(1): m.group(0) for m in re.finditer(r"^FROM \S+ AS ([\w-]+)$.*?(?=^FROM |\Z)", text, re.MULTILINE | re.DOTALL)}
     for name in ("build", "test"):
         runs = re.findall(r"^RUN (.*?)(?=^[A-Z]+ |\Z)", stages[name], re.MULTILINE | re.DOTALL)
         assert runs and all(run.startswith("--network=none ") for run in runs), name
