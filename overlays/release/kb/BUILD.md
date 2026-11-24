@@ -112,7 +112,7 @@ version column is the group that needs it), and no version floats (`latest`, `st
   `--offline` builds from the deps branch (`cargo --config` the cargo home `deps use` writes, `CARGO_NET_OFFLINE`).
 - `release universal` joins the two built `[release.universal] macos` targets with `lipo` and checks `lipo -info` lists both.
 - `release image --arch ARCH` runs `podman build` (or `docker`) on the native runner and saves an OCI archive
-  (`podman save --format oci-archive`) as `dist/NAME-VERSION-image-ARCH.tar`. Nothing is pushed to a registry.
+  (`podman save --format oci-archive`) as `dist/NAME-VERSION-image-ARCH.tar`. Nothing is pushed to a registry. `[release.image] from_deps = true` builds it as `container build` does (see "Container builds"), for a Containerfile made from the template.
 - `release verify` checks with `file` that each Linux binary in `dist/` is statically linked.
 
 A workflow runs `release matrix`, builds each target on its runner, and uploads `dist/`.
