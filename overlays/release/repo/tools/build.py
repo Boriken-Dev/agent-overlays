@@ -3283,6 +3283,7 @@ SCHEMA["release"] = Key(
                 "context": Key("str", ".", "The build context, relative to the repository."),
                 "name": Key("str", "", "The image name; empty: the release name."),
                 "tool": Key("str", "", "`podman` or `docker`; empty: podman when found, else docker."),
+                "from_deps": Key("bool", False, "Build as `container build` does (the deps branch as a build context, the .env keys), for a Containerfile made from the template."),
                 "archs": Key("map", {}, "The architectures (amd64, arm64) and the runner that builds each."),
             },
         ),
@@ -3470,7 +3471,14 @@ def release_image(ctx: Ctx, args: argparse.Namespace) -> int:
     if tool not in ("podman", "docker"):
         raise Problem("neither podman nor docker is installed")
     tag = f"{image.name or release_name(ctx)}:{release_version(ctx)}-{args.arch}"
-    run_tool([tool, "build", "--platform", f"linux/{args.arch}", "-f", str(ctx.root / image.file), "-t", tag, str(ctx.root / image.context)])
+    if image.from_deps:
+        plan = container_plan(ctx, argparse.Namespace(env=[], tag=tag), "", os.environ, fetch=True, platform=f"linux/{args.arch}")
+        tool = plan.engine
+        if not shutil.which(tool):
+            raise Problem(f"{tool} is not installed")
+        run_tool(plan.command, {**os.environ, **plan.secrets}, ctx.root)
+    else:
+        run_tool([tool, "build", "--platform", f"linux/{args.arch}", "-f", str(ctx.root / image.file), "-t", tag, str(ctx.root / image.context)])
     dist = ctx.root / cfg.dist
     dist.mkdir(parents=True, exist_ok=True)
     out = dist / f"{release_name(ctx)}-{release_version(ctx)}-image-{args.arch}.tar"
@@ -3821,8 +3829,10 @@ class ContainerPlan(NamedTuple):
     notes: list[str]
 
 
-def container_plan(ctx: Ctx, args: argparse.Namespace, stage: str, environ: Any, fetch: bool) -> ContainerPlan:
-    """The engine command for one build and what is reported about it; `fetch` false runs and writes nothing."""
+def container_plan(ctx: Ctx, args: argparse.Namespace, stage: str, environ: Any, fetch: bool, platform: str = "") -> ContainerPlan:
+    """The engine command for one build and what is reported about it; `fetch` false runs and writes nothing.
+
+    `platform` is the engine's --platform and wins over CONTAINER_PLATFORM."""
     cfg, image = ctx.cfg.container, ctx.cfg.release.image
     file, context = cfg.file or image.file, cfg.context or image.context
     if not file:
@@ -3864,8 +3874,8 @@ def container_plan(ctx: Ctx, args: argparse.Namespace, stage: str, environ: Any,
     name = cfg.name or image.name or release_name(ctx)
     tag = args.tag or f"{name + '-test' if stage == cfg.test_stage else name}:{release_version(ctx)}"
     command = [engine, "build", "--file", str(ctx.root / file), *(["--target", stage] if stage else []), "--tag", tag]
-    if "CONTAINER_PLATFORM" in values:
-        command += ["--platform", values["CONTAINER_PLATFORM"][0]]
+    if platform or "CONTAINER_PLATFORM" in values:
+        command += ["--platform", platform or values["CONTAINER_PLATFORM"][0]]
     command += ["--build-context", f"deps={deps}", "--build-context", f"ca={ca_dir}", *build_args]
     for label, text in labels.items():
         command += ["--label", f"{label}={text}"]

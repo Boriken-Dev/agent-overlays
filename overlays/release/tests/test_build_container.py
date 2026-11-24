@@ -548,3 +548,27 @@ def test_the_template_in_a_fixture_repository_prints_the_build_with_the_context_
     command = [word.strip("'") for word in shlex.split(lines[-1], posix=False)]
     assert command[:8] == ["podman", "build", "--file", str(root / "packaging/container/Containerfile"), "--target", "test", "--tag", "tool-test:0.1.0"]
     assert f"deps={deps.resolve()}" in command and any(word.startswith("ca=") for word in command)
+
+
+# --- release image through the container build ---------------------------------------------------------------------
+
+
+def test_release_image_from_deps_builds_with_the_deps_context_for_the_arch_and_saves_the_archive(build, repo, deps, monkeypatch):
+    ctx_for(build, repo, CFG.replace('file = "packaging/container/Containerfile"', 'file = "packaging/container/Containerfile"\nfrom_deps = true\narchs = { amd64 = "x", arm64 = "y" }'))
+    ran = []
+
+    def run(command, env=None, cwd=None):
+        ran.append(command)
+        if "save" in command:
+            Path(command[command.index("-o") + 1]).write_bytes(b"archive")
+
+    monkeypatch.setattr(build, "run_tool", run)
+    monkeypatch.setattr(build.shutil, "which", lambda name: f"/usr/bin/{name}" if name == "podman" else None)
+    monkeypatch.setenv("DEPS_DIR", str(deps))
+    assert build.main(["--root", str(repo), "release", "image", "--arch", "arm64"]) == 0
+    built, saved = ran
+    assert built[:2] == ["podman", "build"] and args_of(built, "--platform") == ["linux/arm64"] and args_of(built, "--tag") == ["tool:1.2.3-arm64"]
+    assert args_of(built, "--build-context")[0] == f"deps={deps.resolve()}"
+    out = repo / "dist" / "tool-1.2.3-image-arm64.tar"
+    assert saved == ["podman", "save", "--format", "oci-archive", "-o", str(out), "tool:1.2.3-arm64"]
+    assert "tool-1.2.3-image-arm64.tar" in (repo / "dist" / "SHA256SUMS").read_text(encoding="utf-8")
