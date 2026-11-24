@@ -195,8 +195,9 @@ expect = "{sha256}"
   `build.py.non-default` (the names of the keys that differ from the lock, never their values).
 - **The settings** are read, later wins, from `.env`, `.env.local`, the process environment (known keys only) and
   `--env KEY=VALUE`. `.env` and `.env.local` are ignored by git; `.env.example` is committed. A key that is not in the
-  catalogue (`build.py help env`) is an error naming the file and line; an empty value clears a key. `.env` is read by
-  `container` only, so another tool's `.env` in the same directory breaks nothing else.
+  catalogue (`build.py help env`) is an error naming the file and line; an empty value clears a key. `sdk install` and
+  `release build` read only the native keys (below) from the same files and leave the rest to `container`, so another tool's
+  `.env` in the same directory breaks nothing there.
 - Every key is a source or a location: mirrors for rustup (`RUSTUP_DIST_SERVER`, `RUSTUP_UPDATE_ROOT`,
   `RUSTUP_INIT_BASE_URL`) and the package archive (`APT_MIRROR`); `BASE_IMAGE` and `RUNTIME_IMAGE`, which need an
   `@sha256:` digest unless `ALLOW_UNPINNED_IMAGE=1`; `DEPS_DIR`, or `DEPS_GIT_URL` and `DEPS_REF` (a commit other than the
@@ -206,6 +207,30 @@ expect = "{sha256}"
 - A key whose value carries credentials (a proxy, a mirror with a user) goes to the engine as `--build-arg KEY` with the
   value in the engine's environment: it is on no command line and in no output, and a URL printed anywhere has its user and
   password replaced.
+- **Native keys** point a build on this machine at Visual Studio, the Windows SDK and clang, and are read by `sdk install`
+  and `release build` (and reported, then ignored, by `container`). Each path is checked when it is read, and a wrong one
+  fails naming the key and the layer it came from, before anything is installed or cargo runs:
+
+  | Key | Names | Must hold | Used as |
+  | --- | --- | --- | --- |
+  | `VSINSTALLDIR` | Visual Studio or Build Tools root | `VC/` | set for cargo (the `cc` crate reads it); stands in for vswhere in `sdk install`'s component checks |
+  | `VCTOOLSINSTALLDIR` | the MSVC toolset (`VC/Tools/MSVC/VERSION`) | `bin/`, `include/`, `lib/` | set for cargo |
+  | `WINDOWSSDKDIR` | the Windows SDK root (`Windows Kits/10`) | `Include/`, `Lib/` | set for cargo; stands in for the default location in `sdk install`'s SDK check |
+  | `WINDOWSSDKVERSION` | the SDK version, such as `10.0.26100.0` (a trailing backslash, as vcvars writes it, is fine) | `Lib/VERSION` under `WINDOWSSDKDIR` when both are set | set for cargo |
+  | `LIBCLANG_PATH` | the directory of libclang | `libclang.*` | set for cargo (bindgen, clang-sys) |
+  | `LLVM_DIR` | an LLVM installation | `bin/clang*` | its `bin` first on `PATH`; `sdk install` fetches no LLVM; `LIBCLANG_PATH` defaults to its `bin` when that holds libclang |
+  | `SDK_HOME` | where `sdk install` puts things | a directory, or nothing yet | the prefix: `--prefix`, then `SDK_HOME`, then `$BUILD_SDK_HOME`, then `~/.REPO-sdk` |
+
+  `sdk install` writes the set keys into `env.sh` and `env.ps1`; `release build` adds them to cargo's environment and prints
+  `native: KEY=VALUE (where)` for each. A directory given as `VSINSTALLDIR` replaces vswhere, so `sdk install` cannot tell
+  which components it has: the build then proves it. Nothing of Microsoft's is copied: the keys only point.
+- **Cross building to Windows** from Linux: the template's optional `cross-sdk`, `cross` and `cross-out` stages build
+  `x86_64-pc-windows-msvc` with clang-cl and lld-link against `MSVC_SPLAT_DIR`, an xwin-style splat (`crt/` and `sdk/`).
+  The directory is the `msvc` build context (always passed, empty when unset) and the one `RUN` that links mounts it with
+  `--mount=type=bind,from=msvc,target=/mnt/msvc,readonly`, so no layer of any image holds a file of it, and the key is never
+  a build argument. A splat is made from Microsoft's files under Microsoft's terms: read them before making or sharing one.
+  A repository without a Windows binary deletes the three stages. `container build --target cross-out` builds it; a build
+  with no splat stops on a line that says `MSVC_SPLAT_DIR is not set`.
 - Nothing proprietary goes in an image: Microsoft's compilers and SDK files are never baked in or committed.
 
 ## `public_api.py` and `apk.py`
