@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import re
+import shlex
 from pathlib import Path
 
 import pytest
 
-from conftest import commit_all, git, init_repo
+from conftest import REPO_TOOLS, commit_all, git, init_repo
 from test_build_deps import LIB_HEAD, LOCK, ctx_for, vendored
 
 RUSTUP_X64 = "a" * 64
@@ -425,3 +427,124 @@ def test_container_without_a_containerfile_setting_says_so(build, tmp_path, caps
     root = tmp_path / "bare"
     ctx_for(build, root, "")
     assert container(build, root, capsys, "build", "--print", ok=1).strip().endswith("[container] file (or [release.image] file) is not set")
+
+
+# --- the template and its rules -----------------------------------------------------------------------------------
+
+TEMPLATE = REPO_TOOLS.parent / "packaging" / "container" / "Containerfile.rust"
+ENV_EXAMPLE = REPO_TOOLS.parent / ".env.example"
+BUILD_MD = REPO_TOOLS.parents[1] / "kb" / "BUILD.md"
+PREDEFINED = {"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"}
+
+
+def template_arg(name: str) -> str:
+    return re.search(rf"^ARG {name}=(\S+)$", TEMPLATE.read_text(encoding="utf-8"), re.MULTILINE).group(1)
+
+
+def documented_rules() -> str:
+    """The [container] and [[sdk.agree]] block BUILD.md tells a repository to copy."""
+    text = BUILD_MD.read_text(encoding="utf-8")
+    block = re.search(r"## Container builds.*?```toml\n(.*?)```", text, re.DOTALL).group(1)
+    assert block.count("[[sdk.agree]]") == 8
+    return block
+
+
+def template_repo(build, tmp_path) -> Path:
+    """A repository holding the template as its Containerfile and a lock made of the template's own pins."""
+    root = init_repo(tmp_path / "t")
+    cfg = f'[sdk]\ngroups = ["core", "release", "deps"]\nall_platforms = []\n[release]\nname = "tool"\n[release.image]\nfile = "packaging/container/Containerfile"\n{documented_rules()}'
+    ctx_for(build, root, cfg)
+    container_dir = root / "packaging" / "container"
+    container_dir.mkdir(parents=True)
+    (container_dir / "Containerfile").write_bytes(TEMPLATE.read_bytes())
+    rust, digest = template_arg("BASE_IMAGE").removeprefix("docker.io/library/rust:").split("@sha256:")
+    debian, runtime_digest = template_arg("RUNTIME_IMAGE").removeprefix("docker.io/library/debian:").split("@sha256:")
+    version = template_arg("RUSTUP_VERSION")
+    rows = [
+        f"core rustup-init {version} linux-x64 {template_arg('RUSTUP_INIT_SHA256_X86_64')} https://static.example.com/x86_64/rustup-init",
+        f"core rustup-init {version} linux-arm64 {template_arg('RUSTUP_INIT_SHA256_AARCH64')} https://static.example.com/aarch64/rustup-init",
+        f"core rust {template_arg('RUST_VERSION')} any - -",
+        f"release rust-image {rust} any {digest} docker://docker.io/library/rust",
+        f"release debian-image {debian} any {runtime_digest} docker://docker.io/library/debian",
+    ]
+    (root / "tools" / "sdk.lock").write_text("# lock\n" + "\n".join(rows) + "\n", encoding="utf-8")
+    return root
+
+
+def check_sdk(build, root, capsys) -> tuple[int, str]:
+    capsys.readouterr()
+    code = build.main(["--root", str(root), "sdk", "check"])
+    return code, capsys.readouterr().err
+
+
+def test_the_template_has_the_stages_and_every_build_argument_of_the_catalogue(build):
+    text = TEMPLATE.read_text(encoding="utf-8")
+    assert re.findall(r"^FROM \S+ AS (\w+)$", text, re.MULTILINE) == ["sdk", "build", "test", "runtime"]
+    declared = set(re.findall(r"^ARG ([A-Z0-9_]+)(?:=|$)", text, re.MULTILINE))
+    wanted = {key for key, spec in build.ENV_KEYS.items() if spec.arg} - PREDEFINED
+    assert wanted <= declared, sorted(wanted - declared)
+    assert declared <= set(build.ENV_KEYS) | {"BASE_IMAGE", "RUNTIME_IMAGE"}, sorted(declared - set(build.ENV_KEYS))
+
+
+def test_the_build_and_test_stages_run_every_step_with_no_network_and_the_sdk_stage_checks_the_hash(build):
+    text = TEMPLATE.read_text(encoding="utf-8")
+    stages = {m.group(1): m.group(0) for m in re.finditer(r"^FROM \S+ AS (\w+)$.*?(?=^FROM |\Z)", text, re.MULTILINE | re.DOTALL)}
+    for name in ("build", "test"):
+        runs = re.findall(r"^RUN (.*?)(?=^[A-Z]+ |\Z)", stages[name], re.MULTILINE | re.DOTALL)
+        assert runs and all(run.startswith("--network=none ") for run in runs), name
+    assert "sha256sum --check --strict" in stages["sdk"] and "--network=none" not in stages["sdk"]
+    assert "COPY --from=deps /crates /deps/crates" in stages["build"]
+    assert "python3 tools/build.py offline plan --deps /deps --out /opt/offline" in stages["build"]
+    assert "cargo --config /opt/offline/cargo-home/config.toml build --release --locked --offline" in stages["build"]
+    assert "cargo --config /opt/offline/cargo-home/config.toml test --workspace --all-features --locked --offline" in stages["test"]
+    assert "ARG " not in stages["runtime"]
+
+
+def test_the_env_example_documents_every_key_with_its_default_commented_out(build):
+    text = ENV_EXAMPLE.read_text(encoding="utf-8")
+    documented = set(re.findall(r"^#([A-Z][A-Z0-9_]+)=", text, re.MULTILINE))
+    assert documented == set(build.ENV_KEYS)
+    assert build.parse_env_text(text, ".env.example") == ([], [])
+
+
+def test_the_documented_rules_hold_the_template_to_the_lock_and_fail_when_either_changes(build, tmp_path, capsys):
+    root = template_repo(build, tmp_path)
+    assert check_sdk(build, root, capsys)[0] == 0
+    containerfile = root / "packaging" / "container" / "Containerfile"
+    original = containerfile.read_text(encoding="utf-8")
+    zeros = "0" * 64
+    mutations = {
+        "base image digest": (f"rust:1.89-bookworm@sha256:{zeros}", f"rust:1.89-bookworm@sha256:{'1' * 64}"),
+        "base image tag": ("rust:1.89-bookworm@", "rust:1.90-bookworm@"),
+        "runtime digest": (f"bookworm-slim@sha256:{zeros}", f"bookworm-slim@sha256:{'2' * 64}"),
+        "runtime tag": ("debian:bookworm-slim@", "debian:trixie-slim@"),
+        "toolchain": ("ARG RUST_VERSION=1.100.0", "ARG RUST_VERSION=1.101.0"),
+        "rustup version": ("ARG RUSTUP_VERSION=1.29.2", "ARG RUSTUP_VERSION=1.30.0"),
+        "x86_64 hash": (f"ARG RUSTUP_INIT_SHA256_X86_64={zeros}", f"ARG RUSTUP_INIT_SHA256_X86_64={'3' * 64}"),
+        "aarch64 hash": (f"ARG RUSTUP_INIT_SHA256_AARCH64={zeros}", f"ARG RUSTUP_INIT_SHA256_AARCH64={'4' * 64}"),
+    }
+    for label, (old, new) in mutations.items():
+        assert original.count(old) == 1, label
+        containerfile.write_text(original.replace(old, new), encoding="utf-8")
+        code, err = check_sdk(build, root, capsys)
+        assert code == 1 and "Containerfile" in err, label
+    containerfile.write_text(original, encoding="utf-8")
+    assert check_sdk(build, root, capsys)[0] == 0
+    lock = (root / "tools" / "sdk.lock").read_text(encoding="utf-8")
+    (root / "tools" / "sdk.lock").write_text(lock.replace("core rust 1.100.0 any", "core rust 1.102.0 any"), encoding="utf-8")
+    code, err = check_sdk(build, root, capsys)
+    assert code == 1 and "1.102.0" in err
+
+
+def test_the_template_in_a_fixture_repository_prints_the_build_with_the_context_and_no_non_default(build, tmp_path, capsys, deps):
+    root = template_repo(build, tmp_path)
+    (root / "Cargo.toml").write_text('[package]\nname = "tool"\nversion = "0.1.0"\n', encoding="utf-8")
+    (root / "Cargo.lock").write_text(LOCK, encoding="utf-8")
+    commit_all(root)
+    out = container(build, root, capsys, "test", "--print", "--env", f"DEPS_DIR={deps}", "--env", f"BASE_IMAGE={template_arg('BASE_IMAGE')}")
+    lines = out.splitlines()
+    assert lines[0].startswith("non-default: DEPS_DIR=")
+    assert "BASE_IMAGE=" not in lines[0] and not lines[1].startswith("non-default: BASE_IMAGE")
+    command = [word.strip("'") for word in shlex.split(lines[-1], posix=False)]
+    assert command[:8] == ["podman", "build", "--file", str(root / "packaging/container/Containerfile"), "--target", "test", "--tag", "tool-test:0.1.0"]
+    assert f"deps={deps.resolve()}" in command and any(word.startswith("ca=") for word in command)
