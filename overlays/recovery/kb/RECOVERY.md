@@ -1,7 +1,7 @@
 # Recovering Lost Agent Config / Files
 
 Read this when `~/.agents` (or any agent-authored file) is lost or corrupted and needs
-reconstruction. Distilled from a real loss+recovery of `~/.agents`.
+reconstruction.
 
 ## Priority order of sources (best first)
 
