@@ -7,17 +7,17 @@ any of it into the (often public) project repos.
 ## The model
 
 Your global `~/.agents` **is** a private git repo. Its root is the per-user config
-(`AGENTS.md`, the installed `overlays/` or a registry naming them, the `findings/`
-queue). A new `projects/` tree holds each project's private `.agents` payload:
+(`AGENTS.md`, the installed `overlays/` or a registry naming them, the user-scope
+findings queue). A new `projects/` tree holds each project's private `.agents` payload:
 
 ```
 ~/.agents/                       # = clone of your private repo
 ├── AGENTS.md                     # per-user config (dotagents-managed block + your edits)
 ├── dotagents.toml                # (registry layout) one source per overlay
 ├── overlays/                     # your installed global overlays (tracked, or not)
-├── findings/                     # the user-scope findings queue — private + synced too
+├── findings/                     # the user-scope findings queue, private and synced
 └── projects/                     # per-project private .agents payloads
-    ├── <project-a>/              # plans/  kb/  findings/  AGENTS.md (user-managed)
+    ├── <project-a>/              # the project's private files
     └── <project-b>/ ...
 ```
 
@@ -212,14 +212,10 @@ curl -fsSL https://raw.githubusercontent.com/<you>/dotagents/main/tools/cloud-se
 `.../dotagents/v0.2.0/tools/cloud-setup.sh` — for reproducibility.) The
 per-session hooks then handle pulls and sync-back once `~/.agents` is present.
 
-The setup-script clone runs very early and often loses a race with egress/proxy
-readiness. `cloud-setup.sh` self-heals: the clone retries with backoff, and if it still
-fails it persists a copy of itself to `~/.dotagents/cloud-setup.sh` and wires a
-SessionStart **recovery hook** that re-runs the bootstrap next session — by then egress
-is up, so the clone (and hook wiring) succeeds, and that run removes the recovery hook.
-This matters because hook wiring is the *last* step: without the recovery path, one early
-clone failure would skip it, leaving the SessionStart hook unregistered and nothing to
-recover the environment.
+The setup-script clone runs early and can lose a race with egress/proxy readiness.
+`cloud-setup.sh` retries the clone with backoff; if it still fails it persists a copy of
+itself to `~/.dotagents/cloud-setup.sh` and wires a SessionStart **recovery hook** that
+re-runs the bootstrap next session and then removes itself.
 
 Auth for the clone/push comes from the environment, never a committed file:
 
@@ -232,21 +228,16 @@ Auth for the clone/push comes from the environment, never a committed file:
   but is then persisted in `.git/config` — avoid it.
 - `AGENTS_HOME` — where the repo lives (default `$HOME/.agents`).
 
-Why a PAT (not the session's own GitHub auth): a hosted agent runner authenticates git
-through a per-session, repo-scoped credential, and a repo whose name starts with `.`
-can't be added to that scope — so a dot-named private repo needs its own token. (A
-non-dot repo name can instead use the runner's built-in auth with no token.) Store the
-token as an environment secret and treat its read/write scope as sensitive; the cloud
-network policy must allow `github.com`.
+A dot-named private repo needs the PAT: a hosted runner's per-session, repo-scoped
+credential cannot cover a repo whose name starts with `.` (a non-dot name can use the
+runner's built-in auth with no token). Store the token as an environment secret; the
+cloud network policy must allow `github.com`.
 
-Such runners also often rewrite all `github.com` git traffic (via a global `insteadOf`)
-to that scoped proxy, which won't serve a repo outside session scope — so a plain
-`git clone`/`push` of the private repo would be redirected and fail. The hooks handle
-this automatically: `hooks/_agents-git-auth.sh` (sourced by both hooks) detects a
-github→proxy rewrite and, when a token is present, points git at an isolated config that
-bypasses the rewrite so the token authenticates directly against `github.com`. Without a
-rewrite it offers the token only for `$AGENTS_REMOTE` (else github.com), through git's
-`GIT_CONFIG_*` environment for the hook's own git calls; it never
+Runners often rewrite all `github.com` git traffic (a global `insteadOf`) to a scoped
+proxy that won't serve a repo outside session scope. `hooks/_agents-git-auth.sh`
+(sourced by both hooks) detects that rewrite and, when a token is present, points git
+at an isolated config that bypasses it. Without a rewrite it offers the token only for
+`$AGENTS_REMOTE` (else github.com) through git's `GIT_CONFIG_*` environment, and never
 writes `~/.gitconfig`. Nothing to configure beyond `DOTAGENTS_AGENTS_TOKEN`.
 
 ## Gotchas
