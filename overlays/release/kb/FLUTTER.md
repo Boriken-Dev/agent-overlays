@@ -17,9 +17,3 @@ they run Canoa's own build steps. The rest has no project in it.
 
 Defaults: the mirror's local state is `~/.cache/flutter_mirror` (`--state`, or `$FLUTTER_MIRROR_STATE`), the served tree is `~/.cache/flutter_artifacts/tree`
 (`--tree`/`--dir`), downloads are staged in `~/.cache/flutter_artifacts/work/<engine>` (`--work`).
-
-## Why it is in the release overlay
-
-A Flutter project's release needs the SDK pinned to a mirror commit and its engine published, which is the release process's input; the
-overlay already carries `build.py`'s Flutter helpers and requires the engineering overlay that supplies `blob-scan`. A separate overlay
-would only repeat that requirement.
