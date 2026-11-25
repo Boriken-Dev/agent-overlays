@@ -102,7 +102,8 @@ A section the configuration leaves out is off.
 
 - `[deps.pub] lock = "app/pubspec.lock"` puts the Dart packages on the deps branch: `deps sync --pub-cache DIR` copies the
   hosted packages and their hashes (`pub/hosted/HOST/NAME-VERSION`, `pub/hosted-hashes/`) and, with `git = "checkout"`, each git
-  package's checkout without `.git` (`pub/git/REPO-REVISION/`); with `git = "record"` git packages are only listed in
+  package's own folder of its checkout, the lock's `path` (`pub/git/REPO-REVISION/PATH/`, no `.git`, nothing else of the
+  repository; a package at the root takes the whole checkout); with `git = "record"` git packages are only listed in
   `manifest.json`. Only packages the lock names are copied. The `drop` directories (default `test`, `tests`, `example`,
   `examples`, `benchmark`, `benchmarks`, `doc`, `docs`, `.github`) and every file the scanner would refuse are left out and
   listed in the manifest. `require` names packages that must be present whatever pub resolves. `deps check` fails on any
@@ -113,7 +114,7 @@ A section the configuration leaves out is off.
   `target/offline-pub-cache` (git packages the branch only records come from the user's pub cache, which is only read) and
   writes the cargo home, or prints why a build must go online. For a git package of `git = "checkout"` it writes what pub
   needs to take the checkout without the network: `.git/pub-packages` lists each folder of the checkout that holds a
-  `pubspec.yaml` (`.` for its root; rewritten on every run), and `git/cache/REPO-SHA1` (the SHA-1 of the package's URL) is a
+  `pubspec.yaml` (`.` for its root; rewritten on every run, so it names only the folders the branch holds), and `git/cache/REPO-SHA1` (the SHA-1 of the package's URL) is a
   bare repository in which the locked revision resolves, through `refs/replace/REV`, to an empty commit; an existing one
   is kept. Without them `flutter pub get --offline` clones from the network.
 - `offline env [--json]` runs the plan and prints the variables an offline build runs under, as `KEY=VALUE` lines or a JSON
@@ -169,7 +170,7 @@ version column is the group that needs it), and no version floats (`latest`, `st
   the lock. `--online` compares each download's hash with what its publisher says (rustup's `.sha256`, Node's
   `SHASUMS256.txt`, a GitHub release asset's `digest`). `expect` is a Python format string, so a slice works: a Containerfile's
   `ARG FLUTTER_IMAGE_TAG=` that is the first ten digits of a commit is held to the row with `expect = "{version:.10}"`.
-- `sdk install [--groups a,b] [--prefix DIR] [--check] [--print-system] [--platform OS-ARCH]` installs the groups under one
+- `sdk install [--groups a,b] [--prefix DIR] [--check] [--print-system] [--platform OS-ARCH] [--precache A,B]` installs the groups under one
   prefix (default `$BUILD_SDK_HOME`, else `~/.REPO-sdk`) and never touches the shell profile, PATH or the system, and never
   elevates: rustup without profile edits, each `rust` row as a toolchain (numeric versions with the `rust-component` and
   `rust-target` rows; a `nightly-DATE` without), `cargo-*` rows with `cargo install --locked`, archives unpacked member by
@@ -177,7 +178,12 @@ version column is the group that needs it), and no version floats (`latest`, `st
   requirements file, the locked LLVM on Windows ARM64 only when no clang is found, `docker://` rows reported, and
   `env.sh`/`env.ps1` written (`[sdk.env]` and `[sdk] path` add variables and directories). Every download is verified against
   the lock before it is used. `--check` installs nothing and exits 1 when something is missing; `system` rows are only checked,
-  and `--print-system` prints `[sdk.system] print` for the platform.
+  and `--print-system` prints `[sdk.system] print` for the platform. `--precache A,B` replaces `[flutter] precache` for that
+  call (what is precached and what `--check` holds the checkout to).
+- Groups that name no `rust` row (`--groups app` alone) install their `cargo-*` rows and `[[deps.vendor]]` tools without the
+  rust toolchain or rustup: cargo is the locked toolchain when this prefix's rustup already has a numeric `rust` row of the
+  lock (any group), else the first `cargo` on `PATH` with `CARGO_HOME` set to the prefix's; with neither the install stops
+  naming the tool, and `--check` only reports it missing.
 - A `[[deps.vendor]]` item (a tool built from the crate on the deps branch) is installed with `cargo --config CONFIG install
   --offline --locked NAME --version V`, `CONFIG` being the cargo home `deps use` writes for its folder under the prefix; it
   needs the deps checkout (`--deps DIR`, else the usual lookup) and never falls back to the network: with none, `--check`
