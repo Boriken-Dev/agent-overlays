@@ -1480,6 +1480,11 @@ class DirView:
         target = self.path / rel
         return target.read_bytes() if target.is_file() else None
 
+    def files(self, rel: str) -> list[str]:
+        """The files below a folder, as paths relative to it."""
+        base = self.path / rel
+        return sorted(p.relative_to(base).as_posix() for p in base.rglob("*") if p.is_file()) if base.is_dir() else []
+
 
 class RefView:
     """A commit of the repository, for the same checks."""
@@ -1494,6 +1499,11 @@ class RefView:
     def read(self, rel: str) -> bytes | None:
         done = subprocess.run(["git", "-C", str(self.root), "show", f"{self.commit}:{rel}"], capture_output=True)
         return done.stdout if done.returncode == 0 else None
+
+    def files(self, rel: str) -> list[str]:
+        done = subprocess.run(["git", "-C", str(self.root), "ls-tree", "-r", "--name-only", "-z", self.commit, "--", rel], capture_output=True)
+        names = done.stdout.decode("utf-8", "surrogateescape").split("\0") if done.returncode == 0 else []
+        return sorted(n.removeprefix(rel.rstrip("/") + "/") for n in names if n)
 
 
 # Extra coverage checks and sync steps, added by the sections below (pub, CDN).
@@ -1970,7 +1980,7 @@ def deps_refresh(ctx: Ctx, args: argparse.Namespace) -> int:
     deps = find_deps(ctx, args.deps)
     if not git_ok("symbolic-ref", "-q", "HEAD", cwd=deps):
         raise Problem(f"{deps} is not on a branch; `deps init` makes one, or git -C {deps} checkout -B {cfg.branch} origin/{cfg.branch}")
-    generated = [*folders, "pub", "cdn", MANIFEST]
+    generated = [*folders, "pub", "cdn", *[t.path for t in ctx.cfg.deps.tree], MANIFEST]
     dirty = run_git("status", "--porcelain", "--", ".", *[f":!{g}" for g in generated], cwd=deps)
     if dirty:
         raise Problem(f"{deps} has changes outside {', '.join(generated)}: {dirty.splitlines()[0]}")
@@ -2194,6 +2204,10 @@ def add_deps(sub: argparse._SubParsersAction) -> None:
     refresh.set_defaults(run=deps_refresh)
     where = commands.add_parser("path", parents=[common], help="print the deps checkout, adding the worktree when it is missing")
     where.set_defaults(run=deps_path)
+    pinning = commands.add_parser("tree-pin", help="point a [[deps.tree]] pin file at a commit: fetch it and write its commit and every file's SHA-256")
+    pinning.add_argument("name", help="the [[deps.tree]] name")
+    pinning.add_argument("commit", help="a 40-hex commit of the tree's repository (a branch would float)")
+    pinning.set_defaults(run=deps_tree_pin)
     init = commands.add_parser("init", help="make the orphan deps branch in a new worktree")
     init.add_argument("--path", type=Path, metavar="DIR", help="the worktree (default: REPO-deps beside the repository)")
     init.set_defaults(run=deps_init)
@@ -2270,6 +2284,19 @@ SCHEMA["deps"].keys["cdn"] = Key(
     {
         "index": Key("str", "", "A JSON file `{\"files\": [{\"host\", \"path\", \"sha256\"}]}`, relative to the repository; files go to cdn/HOST/PATH."),
         "hosts": Key("strs", [], "Only these hosts of the index; empty: all."),
+    },
+)
+SCHEMA["deps"].keys["tree"] = Key(
+    "tables",
+    None,
+    "A whole repository tree at a pinned commit, carried unmodified on the deps branch (a library whose licence allows it only in its original form).",
+    {
+        "name": Key("str", REQUIRED, "The tree's name: its key in manifest.json and on the command line (unique)."),
+        "repo": Key("str", REQUIRED, "The GitHub repository, OWNER/NAME."),
+        "pin": Key("str", REQUIRED, "A JSON file of this repository with at least `commit` (40 hex) and `files` (path to SHA-256, the whole tree); its other keys are the repository's and are kept."),
+        "path": Key("str", REQUIRED, "The folder on the deps branch, for example cdn/office-js."),
+        "license": Key("str", "", "A path in the tree that the pin must name."),
+        "url": Key("str", "https://codeload.github.com/{repo}/tar.gz/{commit}", "Where the archive of the commit is fetched, over {repo} and {commit}; a mirror may replace it."),
     },
 )
 SCHEMA["flutter"] = Key(
@@ -2524,8 +2551,11 @@ def sync_cdn(ctx: Ctx, deps_dir: Path, args: Any) -> tuple[list[str], dict]:
         if fetched:
             changes.append(f"added cdn/{entry['host']}{entry['path']}")
     cdn = deps_dir / "cdn"
+    carried = [(deps_dir / t.path).resolve() for t in ctx.cfg.deps.tree]
     if cdn.is_dir():
         for file in sorted(f for f in cdn.rglob("*") if f.is_file()):
+            if any(root in file.resolve().parents for root in carried):
+                continue
             if file.resolve() not in wanted:
                 file.unlink()
                 changes.append(f"removed cdn/{file.relative_to(cdn).as_posix()}")
@@ -2582,8 +2612,186 @@ def cdn_check(ctx: Ctx, view: Any, lock: Lock) -> tuple[list[str], list[str]]:
     return found, []
 
 
-DEPS_SYNCS.extend([sync_pub, sync_cdn])
-DEPS_CHECKS.extend([pub_check, cdn_check])
+def tree_pin(ctx: Ctx, tree: Table) -> dict:
+    """The pin file of a tree: its commit and the SHA-256 of every file."""
+    if not tree.path or unsafe_member(tree.path) or "\\" in tree.path:
+        raise Problem(f"deps.tree {tree.name}: path {tree.path!r} is not a relative path without ..")
+    try:
+        pin = json.loads((ctx.root / tree.pin).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise Problem(f"{tree.pin}: {error}") from error
+    files = pin.get("files") if isinstance(pin, dict) else None
+    if not isinstance(files, dict) or not HEX40.match(str(pin.get("commit", ""))) or not all(HEX64.match(str(v)) for v in files.values()):
+        raise Problem(f"{tree.pin}: needs a 40-hex `commit` and `files`, a map of path to SHA-256")
+    for name in files:
+        if not name or unsafe_member(name) or "\\" in name:
+            raise Problem(f"{tree.pin}: {name!r} is not a relative path without ..")
+    return pin
+
+
+def tree_files(data: bytes) -> dict[str, bytes]:
+    """The files of a source archive below its top directory, by relative path; anything but a regular file is refused."""
+    files: dict[str, bytes] = {}
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+            for member in tar:
+                if unsafe_member(member.name):
+                    raise Problem(f"the archive holds {member.name}, outside its directory")
+                if member.isdir():
+                    continue
+                if not member.isfile():
+                    raise Problem(f"the archive holds {member.name}, which is not a regular file")
+                parts = stripped(member.name, 1)
+                if not parts:
+                    continue
+                name = "/".join(parts)
+                if name in files:
+                    raise Problem(f"the archive holds {name} twice")
+                files[name] = tar.extractfile(member).read()
+    except (tarfile.TarError, OSError, EOFError) as error:
+        raise Problem(f"not a source archive: {error}") from error
+    return files
+
+
+def tree_url(tree: Table, commit: str) -> str:
+    return tree.url.format(repo=tree.repo, commit=commit)
+
+
+def sync_trees(ctx: Ctx, deps_dir: Path, args: Any) -> tuple[list[str], dict]:
+    """Each `[[deps.tree]]` equal to its pin, files unmodified, nothing else below its path."""
+    trees = ctx.cfg.deps.tree
+    if not trees:
+        return [], {}
+    names = [t.name for t in trees]
+    if len(set(names)) != len(names):
+        raise Problem(f"deps.tree: a name is listed twice: {', '.join(sorted(n for n in set(names) if names.count(n) > 1))}")
+    allow = Allow(ctx.cfg.deps.allow)
+    changes: list[str] = []
+    recorded: dict[str, dict] = {}
+    for tree in trees:
+        pin = tree_pin(ctx, tree)
+        wanted: dict[str, str] = pin["files"]
+        if tree.license and tree.license not in wanted:
+            raise Problem(f"{tree.pin} does not name {tree.license}, the licence of {tree.name}")
+        base = deps_dir / tree.path
+        stale: list[str] = []
+        refused: list[str] = []
+        for rel, digest in sorted(wanted.items()):
+            target = base / rel
+            body = target.read_bytes() if target.is_file() else None
+            if body is None or sha256(body) != digest:
+                stale.append(rel)
+            elif (kind := flagged_kind(body, rel.rsplit("/", 1)[-1])) and not allow.permits(f"{tree.path}/{rel}", kind):
+                refused.append(f"{tree.path}/{rel}: {kind}")
+        fresh: dict[str, bytes] = {}
+        if stale:
+            url = tree_url(tree, pin["commit"])
+            fresh = tree_files(fetch(url))
+            if set(fresh) != set(wanted):
+                gone = sorted(set(wanted) - set(fresh))
+                extra = sorted(set(fresh) - set(wanted))
+                raise Problem(
+                    f"{url} is not what {tree.pin} pins: it holds {len(fresh)} files, the pin names {len(wanted)}"
+                    + (f"; the pin names {gone[0]}, which it lacks" if gone else f"; it holds {extra[0]}, which the pin does not name")
+                )
+            different = sorted(rel for rel in stale if sha256(fresh[rel]) != wanted[rel])
+            if different:
+                raise Problem(f"{url} is not what {tree.pin} pins: {len(different)} files differ, the first is {different[0]}")
+            for rel in stale:
+                kind = flagged_kind(fresh[rel], rel.rsplit("/", 1)[-1])
+                if kind and not allow.permits(f"{tree.path}/{rel}", kind):
+                    refused.append(f"{tree.path}/{rel}: {kind}")
+        if refused:
+            raise Problem(
+                f"{tree.name}: the scanner would refuse {len(refused)} files, which are carried whole or not at all; "
+                f"[deps] allow lets a kind through one path: {refused[0]}"
+            )
+        for rel in stale:
+            target = base / rel
+            changes.append(f"{'replaced' if target.exists() else 'added'} {tree.path}/{rel}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(fresh[rel])
+        if base.is_dir():
+            for file in sorted(f for f in base.rglob("*") if f.is_file()):
+                rel = file.relative_to(base).as_posix()
+                if rel not in wanted:
+                    file.unlink()
+                    changes.append(f"removed {tree.path}/{rel}")
+            for folder in sorted((d for d in base.rglob("*") if d.is_dir()), key=lambda d: len(d.parts), reverse=True):
+                if not any(folder.iterdir()):
+                    folder.rmdir()
+        recorded[tree.name] = {
+            "repository": tree.repo,
+            "commit": pin["commit"],
+            "path": tree.path,
+            "files": [{"path": rel, "sha256": wanted[rel], "bytes": (base / rel).stat().st_size} for rel in sorted(wanted)],
+        }
+        changes.append(f"tree {tree.name}: {len(wanted)} files at {pin['commit'][:12]}, {len(stale)} written")
+    return changes, {"trees": recorded}
+
+
+def tree_check(ctx: Ctx, view: Any, lock: Lock) -> tuple[list[str], list[str]]:
+    """Every file a tree's pin names is on the branch with its hash, and nothing else is below its path."""
+    found: list[str] = []
+    notes: list[str] = []
+    if not ctx.cfg.deps.tree:
+        return found, notes
+    deep = not getattr(ctx, "quick", False)
+    try:
+        manifest = json.loads(view.read(MANIFEST) or b"{}")
+    except ValueError:
+        manifest = {}
+    recorded = manifest.get("trees") if isinstance(manifest, dict) and isinstance(manifest.get("trees"), dict) else {}
+    for tree in ctx.cfg.deps.tree:
+        try:
+            pin = tree_pin(ctx, tree)
+        except Problem as problem:
+            found.append(str(problem))
+            continue
+        wanted = pin["files"]
+        have = set(view.files(tree.path))
+        for rel in sorted(set(wanted) - have):
+            found.append(f"{tree.path}/{rel}: missing, {tree.pin} names it")
+        if deep:
+            for rel in sorted(set(wanted) & have):
+                if sha256(view.read(f"{tree.path}/{rel}") or b"") != wanted[rel]:
+                    found.append(f"{tree.path}/{rel}: SHA-256 is not the pin's {wanted[rel]}")
+        for rel in sorted(have - set(wanted)):
+            found.append(f"{tree.path}/{rel}: not in {tree.pin}")
+        if tree.license and tree.license not in wanted:
+            found.append(f"{tree.pin} does not name {tree.license}, the licence of {tree.name}")
+        entry = recorded.get(tree.name)
+        if not isinstance(entry, dict):
+            notes.append(f"{MANIFEST} records no trees.{tree.name}")
+        elif entry.get("commit") != pin["commit"]:
+            found.append(f"{MANIFEST}: trees.{tree.name} is at {entry.get('commit')}, {tree.pin} pins {pin['commit']}")
+    return found, notes
+
+
+def deps_tree_pin(ctx: Ctx, args: argparse.Namespace) -> int:
+    """Points a tree's pin file at a commit: fetches it and writes its `commit` and every file's SHA-256."""
+    tree = next((t for t in ctx.cfg.deps.tree if t.name == args.name), None)
+    if tree is None:
+        raise Usage(f"no [[deps.tree]] named {args.name}; the trees are {', '.join(t.name for t in ctx.cfg.deps.tree) or 'none'}")
+    if not HEX40.match(args.commit):
+        raise Usage(f"{args.commit} is not a 40-hex commit; a branch name would let the pin float")
+    path = ctx.root / tree.pin
+    try:
+        pin = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise Problem(f"{tree.pin}: {error}") from error
+    if not isinstance(pin, dict):
+        raise Problem(f"{tree.pin}: not a JSON object")
+    files = tree_files(fetch(tree_url(tree, args.commit)))
+    pin["commit"] = args.commit
+    pin["files"] = {rel: sha256(files[rel]) for rel in sorted(files)}
+    path.write_bytes((json.dumps(pin, indent=1) + "\n").encode("utf-8"))
+    print(f"pinned {tree.name} at {args.commit}: {len(files)} files")
+    return 0
+
+
+DEPS_SYNCS.extend([sync_pub, sync_cdn, sync_trees])
+DEPS_CHECKS.extend([pub_check, cdn_check, tree_check])
 
 
 # --- offline plan: what an offline build of the repository needs -----------------------------------------------

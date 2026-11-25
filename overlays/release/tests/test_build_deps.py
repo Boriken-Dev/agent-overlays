@@ -1347,3 +1347,193 @@ def test_a_format_2_manifest_without_vendors_gives_notes_and_an_unknown_format_i
     (deps / "manifest.json").write_text(json.dumps({"format": 3}), encoding="utf-8")
     assert build.main(["--root", str(root), "deps", "check", "--deps", str(deps)]) == 1
     assert "format 3, this tool reads 1 and 2" in capsys.readouterr().err
+
+
+# --- a whole repository tree, unmodified, at a pinned commit --------------------------------------------------------
+
+TREE_COMMIT = "c" * 40
+TREE_FILES = {
+    "LICENSE.md": b"Original form only.\r\nSecond line.\r\n",
+    "dist/a.js": b"var a = 1;\r\n",
+    "dist/sub/b.js": b"var b = 2;\n",
+}
+TREE_CFG = (
+    '[[deps.tree]]\nname = "lib"\nrepo = "owner/lib"\npin = "tools/lib.json"\npath = "cdn/lib"\nlicense = "LICENSE.md"\n'
+)
+
+
+def tree_pin_text(build, files: dict[str, bytes], **more) -> str:
+    pin = {"repository": "owner/lib", "commit": TREE_COMMIT, "carried": ["LICENSE.md"], "files": {p: build.sha256(b) for p, b in sorted(files.items())}}
+    return json.dumps({**pin, **more}, indent=1) + "\n"
+
+
+@pytest.fixture
+def tree_repo(build, tmp_path, monkeypatch):
+    root = init_repo(tmp_path / "main")
+    (root / "Cargo.lock").write_text("version = 4\n", encoding="utf-8")
+    ctx_for(build, root, TREE_CFG)
+    (root / "tools" / "lib.json").write_text(tree_pin_text(build, TREE_FILES), encoding="utf-8")
+    asked: list[str] = []
+    served = {"body": crate_archive("lib-cccc", TREE_FILES)}
+
+    def fake(url):
+        asked.append(url)
+        return served["body"]
+
+    monkeypatch.setattr(build, "fetch", fake)
+    commit_all(root)
+    return root, tmp_path / "deps", asked, served
+
+
+def run_deps(build, root, deps, *words) -> int:
+    return build.main(["--root", str(root), "deps", *words, "--deps", str(deps)])
+
+
+def test_a_tree_is_written_unmodified_recorded_and_left_alone_by_a_second_sync(build, tree_repo, capsys):
+    root, deps, asked, _ = tree_repo
+    assert run_deps(build, root, deps, "sync") == 0
+    assert asked == ["https://codeload.github.com/owner/lib/tar.gz/" + TREE_COMMIT]
+    for rel, body in TREE_FILES.items():
+        assert (deps / "cdn" / "lib" / rel).read_bytes() == body, "no trimming and no line-ending change"
+    entry = json.loads((deps / "manifest.json").read_text())["trees"]["lib"]
+    assert entry["commit"] == TREE_COMMIT and entry["path"] == "cdn/lib" and entry["repository"] == "owner/lib"
+    assert {f["path"] for f in entry["files"]} == set(TREE_FILES) and entry["files"][0]["bytes"] == len(TREE_FILES["LICENSE.md"])
+    assert run_deps(build, root, deps, "sync") == 0 and len(asked) == 1, "files that match the pin are left, and nothing is fetched"
+    capsys.readouterr()
+    assert run_deps(build, root, deps, "check") == 0
+    assert "cdn/lib" not in capsys.readouterr().out
+    (deps / "cdn" / "lib" / "extra.txt").write_text("x", encoding="utf-8")
+    (deps / "cdn" / "lib" / "dist" / "a.js").write_bytes(b"edited")
+    assert run_deps(build, root, deps, "sync") == 0
+    assert not (deps / "cdn" / "lib" / "extra.txt").exists() and (deps / "cdn" / "lib" / "dist" / "a.js").read_bytes() == TREE_FILES["dist/a.js"]
+    assert len(asked) == 2
+
+
+def test_an_archive_that_is_not_the_pinned_commit_is_refused_and_writes_nothing(build, tree_repo, capsys):
+    root, deps, _, served = tree_repo
+    served["body"] = crate_archive("lib-cccc", {**TREE_FILES, "dist/a.js": b"var a = 2;\n"})
+    assert run_deps(build, root, deps, "sync") == 1
+    assert "is not what tools/lib.json pins: 1 files differ, the first is dist/a.js" in capsys.readouterr().err
+    served["body"] = crate_archive("lib-cccc", {**TREE_FILES, "more.js": b"x"})
+    assert run_deps(build, root, deps, "sync") == 1
+    assert "it holds more.js, which the pin does not name" in capsys.readouterr().err
+    served["body"] = crate_archive("lib-cccc", {"LICENSE.md": TREE_FILES["LICENSE.md"]})
+    assert run_deps(build, root, deps, "sync") == 1
+    assert "which it lacks" in capsys.readouterr().err
+    assert not (deps / "cdn").exists()
+
+
+def test_a_link_or_a_path_out_of_the_archive_is_refused(build, tree_repo, capsys):
+    root, deps, _, served = tree_repo
+
+    def archive(make) -> bytes:
+        out = io.BytesIO()
+        with tarfile.open(fileobj=out, mode="w:gz") as tar:
+            make(tar)
+        return out.getvalue()
+
+    def link(tar):
+        info = tarfile.TarInfo("lib-cccc/dist/a.js")
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        tar.addfile(info)
+
+    def climb(tar):
+        info = tarfile.TarInfo("lib-cccc/../escape")
+        info.size = 1
+        tar.addfile(info, io.BytesIO(b"x"))
+
+    served["body"] = archive(link)
+    assert run_deps(build, root, deps, "sync") == 1
+    assert "not a regular file" in capsys.readouterr().err
+    served["body"] = archive(climb)
+    assert run_deps(build, root, deps, "sync") == 1
+    assert "outside its directory" in capsys.readouterr().err
+    assert not (deps.parent / "escape").exists()
+
+
+def test_a_file_the_scanner_flags_is_refused_until_allow_names_it(build, tree_repo, capsys):
+    root, deps, _, served = tree_repo
+    files = {**TREE_FILES, "dist/tool.bin": FLAGGED["elf executable"]}
+    (root / "tools" / "lib.json").write_text(tree_pin_text(build, files), encoding="utf-8")
+    served["body"] = crate_archive("lib-cccc", files)
+    assert run_deps(build, root, deps, "sync") == 1
+    err = capsys.readouterr().err
+    assert "cdn/lib/dist/tool.bin: elf executable" in err and "[deps] allow" in err
+    assert not (deps / "cdn").exists(), "nothing is dropped silently, and nothing is written"
+    ctx_for(build, root, TREE_CFG + '[deps]\nallow = ["cdn/lib/dist/*.bin:elf executable"]\n')
+    assert run_deps(build, root, deps, "sync") == 0
+    assert (deps / "cdn" / "lib" / "dist" / "tool.bin").read_bytes() == FLAGGED["elf executable"]
+    ctx_for(build, root, TREE_CFG)
+    assert run_deps(build, root, deps, "sync") == 1, "a file already there is held to the rule too"
+
+
+def test_check_names_a_missing_a_changed_and_an_extra_file_and_quick_skips_the_hash(build, tree_repo, capsys):
+    root, deps, _, _ = tree_repo
+    run_deps(build, root, deps, "sync")
+    capsys.readouterr()
+    (deps / "cdn" / "lib" / "dist" / "sub" / "b.js").unlink()
+    (deps / "cdn" / "lib" / "dist" / "a.js").write_bytes(b"edited")
+    (deps / "cdn" / "lib" / "more.txt").write_text("x", encoding="utf-8")
+    assert run_deps(build, root, deps, "check") == 1
+    err = capsys.readouterr().err
+    assert "cdn/lib/dist/sub/b.js: missing, tools/lib.json names it" in err
+    assert "cdn/lib/dist/a.js: SHA-256 is not the pin's" in err and "cdn/lib/more.txt: not in tools/lib.json" in err
+    assert run_deps(build, root, deps, "check", "--quick") == 1
+    err = capsys.readouterr().err
+    assert "SHA-256" not in err and "missing" in err
+
+
+def test_a_manifest_without_trees_is_a_note_and_one_with_another_commit_a_problem(build, tree_repo, capsys):
+    root, deps, _, _ = tree_repo
+    run_deps(build, root, deps, "sync")
+    manifest = json.loads((deps / "manifest.json").read_text())
+    entry = manifest.pop("trees")
+    (deps / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    capsys.readouterr()
+    assert run_deps(build, root, deps, "check") == 0
+    assert "note: manifest.json records no trees.lib" in capsys.readouterr().out
+    manifest["trees"] = {"lib": {**entry["lib"], "commit": "d" * 40}}
+    (deps / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert run_deps(build, root, deps, "check") == 1
+    assert f"trees.lib is at {'d' * 40}, tools/lib.json pins {TREE_COMMIT}" in capsys.readouterr().err
+
+
+def test_tree_pin_rewrites_the_commit_and_files_and_keeps_the_repositorys_keys(build, tree_repo, capsys):
+    root, deps, asked, served = tree_repo
+    new = {"LICENSE.md": b"New\n", "dist/c.js": b"c\n"}
+    served["body"] = crate_archive("lib-dddd", new)
+    before = json.loads((root / "tools" / "lib.json").read_text())
+    assert build.main(["--root", str(root), "deps", "tree-pin", "lib", "d" * 40]) == 0
+    assert asked[-1].endswith("/tar.gz/" + "d" * 40)
+    text = (root / "tools" / "lib.json").read_bytes()
+    after = json.loads(text)
+    assert list(after) == list(before), "the key order is kept"
+    assert after["commit"] == "d" * 40 and after["carried"] == ["LICENSE.md"] and after["repository"] == "owner/lib"
+    assert after["files"] == {p: build.sha256(b) for p, b in sorted(new.items())}
+    assert text == (json.dumps(after, indent=1) + "\n").encode() and b"\r" not in text
+    with pytest.raises(SystemExit):
+        build.main(["--root", str(root), "deps", "tree-pin", "lib", "main"])
+    assert "a branch name would let the pin float" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        build.main(["--root", str(root), "deps", "tree-pin", "nope", "d" * 40])
+    assert "no [[deps.tree]] named nope" in capsys.readouterr().err
+
+
+def test_the_cdn_step_and_the_tree_step_leave_each_others_files_in_either_order(build, tree_repo, monkeypatch):
+    root, deps, _, served = tree_repo
+    css = b"body {}\n"
+    (root / "tools" / "cdn.json").write_text(
+        json.dumps({"files": [{"host": "cdn.example.test", "path": "/x/site.css", "sha256": build.sha256(css)}]}), encoding="utf-8"
+    )
+    ctx_for(build, root, TREE_CFG + '[deps.cdn]\nindex = "tools/cdn.json"\n')
+    monkeypatch.setattr(build, "fetch", lambda url: served["body"] if "codeload" in url else css)
+    ctx = build.Ctx(root)
+    for order in ((build.sync_cdn, build.sync_trees), (build.sync_trees, build.sync_cdn), (build.sync_cdn, build.sync_trees)):
+        for step in order:
+            step(ctx, deps, None)
+        assert (deps / "cdn" / "cdn.example.test" / "x" / "site.css").read_bytes() == css
+        assert (deps / "cdn" / "lib" / "dist" / "a.js").read_bytes() == TREE_FILES["dist/a.js"]
+    (deps / "cdn" / "other.txt").write_text("x", encoding="utf-8")
+    changes, _ = build.sync_cdn(ctx, deps, None)
+    assert changes == ["removed cdn/other.txt"], "the CDN step still removes what is not its own or a tree's"
