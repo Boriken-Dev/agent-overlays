@@ -65,6 +65,20 @@ commit and the SHA-256 of `Cargo.lock`, and the checks read it.
   branch first, then main. Refresh runs locally and commits as whoever `git config` names; CI only checks.
 - `deps check --ref COMMIT` holds a commit of the repository (fetched with `git fetch --depth 1 origin COMMIT`) to the lock and
   to the scanner: symlinks, `.git` paths and refused kinds are named. `--quick` reads package metadata only, as `deps use` does.
+- **A whole repository tree.** `[[deps.tree]]` (`name`, `repo`, `pin`, `path`, `license`, `url`) carries one commit of a
+  GitHub repository whole and unmodified under `path` on the deps branch, for a library whose licence allows it only in its
+  original form. `pin` is a JSON file of this repository with a 40-hex `commit` and `files`, the SHA-256 of every file of the
+  tree (its other keys are the repository's own, such as a carried subset, and are kept). `deps sync` leaves a file that
+  already matches, otherwise fetches the archive of the commit once (`url`, default codeload.github.com), holds it in
+  memory, refuses anything but regular files with a path inside the tree, requires its files to be exactly the pin's with the
+  pin's hashes, and writes them as they are (no trimming, no line-ending change); files under `path` the pin does not name
+  are removed. A file the scanner would refuse stops the sync, naming its path and kind, unless `[deps] allow` lets that
+  kind through that path; nothing is dropped silently. The CDN step leaves every tree's `path` alone, and the tree step
+  touches nothing outside it. `deps check` (the checkout and `--ref`) names a missing, changed or extra file (`--quick`
+  skips the hash), a `license` the pin does not name, and a manifest entry at another commit, and notes a manifest that
+  records no `trees.NAME`. `manifest.json` gets `trees: {NAME: {repository, commit, path, files: [{path, sha256, bytes}]}}`.
+  `deps tree-pin NAME COMMIT` fetches the archive at a 40-hex commit (a branch name is refused, so a pin never floats) and
+  rewrites the pin file's `commit` and `files`, keeping its other keys and their order (LF, `indent=1`).
 - `deps use` writes a cargo home outside the repository that replaces every source by the checkout's `crates/`;
   `--repo-config` also writes `.cargo/config.toml`, `--json` prints the result for a script (one vendor: the first, or
   `--vendor`).
