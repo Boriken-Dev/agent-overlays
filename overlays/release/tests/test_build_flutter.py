@@ -856,3 +856,66 @@ def test_without_a_host_both_fonts_commands_are_a_usage_error(build, fonts_repo,
         with pytest.raises(SystemExit) as stop:
             build.main(["--root", str(root), "flutter", *argv])
         assert stop.value.code == 2 and "[flutter.fonts] host is not set" in capsys.readouterr().err
+
+
+# --- a git package is copied from its path only -------------------------------------------------------------------------
+
+
+def test_a_git_package_is_copied_from_its_path_and_the_rest_of_its_repository_is_not(build, app):
+    root, cache, deps = app
+    checkout = cache / "git" / GIT_KEY
+    for rel in ("README.md", "big/data.txt", "pkg/other/pubspec.yaml", "pkg/other/lib/o.dart", "pkg/inner/lib/inner.dart", "pkg/inner/test/t.dart"):
+        (checkout / rel).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / rel).write_text("x", encoding="utf-8")
+    assert sync(build, root, cache, deps) == 0
+    git_files = {p for p in tree_of(deps) if p.startswith("pub/git/")}
+    assert git_files == {f"pub/git/{GIT_KEY}/pkg/inner/pubspec.yaml", f"pub/git/{GIT_KEY}/pkg/inner/lib/inner.dart"}
+    # A branch that already holds the whole repository is cut down by the next sync.
+    stale = deps / "pub" / "git" / GIT_KEY / "big"
+    stale.mkdir(parents=True)
+    (stale / "data.txt").write_text("x", encoding="utf-8")
+    assert sync(build, root, cache, deps) == 0
+    assert {p for p in tree_of(deps) if p.startswith("pub/git/")} == git_files
+
+
+def test_packages_of_one_repository_are_each_copied_from_their_own_path_and_a_root_package_takes_it_all(build, app):
+    root, cache, deps = app
+    checkout = cache / "git" / GIT_KEY
+    for rel in ("pkg/other/pubspec.yaml", "pkg/other/lib/o.dart", "elsewhere/x.txt"):
+        (checkout / rel).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / rel).write_text("name: other\n", encoding="utf-8")
+    second = PUBSPEC.split("  gitpkg:")[1].split("sdks:")[0].replace('"pkg/inner"', '"./pkg/other/"')
+    lock = PUBSPEC.replace("sdks:", "  gitother:" + second + "sdks:")
+    (root / "app" / "pubspec.lock").write_text(lock, encoding="utf-8")
+    assert sync(build, root, cache, deps) == 0
+    git_files = {p.removeprefix(f"pub/git/{GIT_KEY}/") for p in tree_of(deps) if p.startswith("pub/git/")}
+    assert git_files == {"pkg/inner/pubspec.yaml", "pkg/other/pubspec.yaml", "pkg/other/lib/o.dart"}
+    (root / "app" / "pubspec.lock").write_text(lock.replace('"./pkg/other/"', '"."'), encoding="utf-8")
+    (checkout / "pubspec.yaml").write_text("name: root\n", encoding="utf-8")
+    assert sync(build, root, cache, deps) == 0
+    git_files = {p.removeprefix(f"pub/git/{GIT_KEY}/") for p in tree_of(deps) if p.startswith("pub/git/")}
+    assert {"pubspec.yaml", "elsewhere/x.txt", "pkg/inner/pubspec.yaml"} <= git_files and ".git/HEAD" not in git_files
+
+
+def test_a_git_path_without_a_package_or_leaving_the_repository_is_refused(build, app, capsys):
+    root, cache, deps = app
+    (cache / "git" / GIT_KEY / "pkg" / "inner" / "pubspec.yaml").unlink()
+    assert sync(build, root, cache, deps) == 1
+    assert f"git/{GIT_KEY} has no package at pkg/inner" in capsys.readouterr().err
+    (root / "app" / "pubspec.lock").write_text(PUBSPEC.replace('"pkg/inner"', '"../escape"'), encoding="utf-8")
+    assert sync(build, root, cache, deps) == 1
+    assert "leaves its repository" in capsys.readouterr().err
+
+
+def test_the_offline_plan_takes_the_reduced_checkout_and_lists_only_the_lock_s_package(build, app, tmp_path, capsys):
+    root, cache, deps = app
+    for rel in ("pkg/other/pubspec.yaml", "other/pubspec.yaml"):
+        (cache / "git" / GIT_KEY / rel).parent.mkdir(parents=True, exist_ok=True)
+        (cache / "git" / GIT_KEY / rel).write_text("name: other\n", encoding="utf-8")
+    sync(build, root, cache, deps)
+    capsys.readouterr()
+    code, result = plan(build, root, deps, cache, capsys, "--out", str(tmp_path / "home"))
+    assert code == 0
+    seeded = Path(result["cache"]) / "git" / GIT_KEY
+    assert (seeded / ".git" / "pub-packages").read_text() == "pkg/inner"
+    assert tree_of(seeded) == {"pkg/inner/pubspec.yaml", ".git/pub-packages"}

@@ -2277,7 +2277,7 @@ SCHEMA["deps"].keys["pub"] = Key(
         "lock": Key("str", "", "The app's pubspec.lock, relative to the repository."),
         "drop": Key("strs", PUB_DROP, "Directories at a package's top that are left out."),
         "require": Key("strs", [], "Packages that must be in the pub cache whatever pub resolves (for example a desktop build's tray and window packages)."),
-        "git": Key("str", "checkout", "`checkout`: pub/git/REPO-REV/ without .git is on the branch; `record`: git packages are only listed in manifest.json."),
+        "git": Key("str", "checkout", "`checkout`: the lock's package folders of pub/git/REPO-REV/ (without .git) are on the branch; `record`: git packages are only listed in manifest.json."),
         "system": Key("strs", [], "System packages the require list links on Linux, recorded in manifest.json for whoever builds offline."),
         "cache": Key("str", "", "The pub cache `deps sync` copies from; empty: --pub-cache, else $PUB_CACHE, else the default of the platform."),
     },
@@ -2468,6 +2468,14 @@ def copy_package(source: Path, target: Path, drop: list[str], allow: Allow, pref
     return dropped, deleted
 
 
+def pub_folder(path: str) -> str:
+    """A git package's `path` in pubspec.lock as a clean POSIX folder of its repository (`.` for the root)."""
+    parts = [part for part in path.replace("\\", "/").split("/") if part not in ("", ".")]
+    if ".." in parts:
+        raise Problem(f"git package path {path!r} leaves its repository")
+    return "/".join(parts) or "."
+
+
 def sync_pub(ctx: Ctx, deps_dir: Path, args: Any) -> tuple[list[str], dict]:
     cfg = ctx.cfg.deps.pub
     lock_path = pubspec_lock_of(ctx)
@@ -2498,14 +2506,24 @@ def sync_pub(ctx: Ctx, deps_dir: Path, args: Any) -> tuple[list[str], dict]:
                 shutil.copyfile(cache / rel, target / rel)
     wanted_git: set[str] = set()
     if cfg.git == "checkout":
-        for p in git:
-            source = cache / "git" / p.key
+        for key in dict.fromkeys(p.key for p in git):
+            source = cache / "git" / key
             if not source.is_dir():
-                raise Problem(f"pub cache {cache} has no git/{p.key}; run `flutter pub get` first")
-            done = copy_package(source, target / "git" / p.key, cfg.drop, allow, f"pub/git/{p.key}", skip_git=True)
-            counts.update(done[0])
-            deleted += done[1]
-            wanted_git.add(p.key)
+                raise Problem(f"pub cache {cache} has no git/{key}; run `flutter pub get` first")
+            # Only the folders the lock names, as pub reads them; the rest of the repository stays in history for good.
+            folders = sorted({pub_folder(p.path) for p in git if p.key == key})
+            if "." in folders:
+                folders = ["."]
+            shutil.rmtree(target / "git" / key, ignore_errors=True)
+            for folder in folders:
+                package = source / folder
+                if not (package / "pubspec.yaml").is_file():
+                    raise Problem(f"pub cache {cache}: git/{key} has no package at {folder}")
+                where = key if folder == "." else f"{key}/{folder}"
+                done = copy_package(package, target / "git" / where, cfg.drop, allow, f"pub/git/{where}", skip_git=True)
+                counts.update(done[0])
+                deleted += done[1]
+            wanted_git.add(key)
     changes = []
     # What the lock no longer names goes.
     for base in ("hosted", "hosted-hashes"):
