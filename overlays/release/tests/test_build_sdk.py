@@ -757,7 +757,9 @@ RELEASE = "https://releases.test/engine-{engine}"
 ENGINE_FILES = {"flutter_infra_release/flutter/web/a.zip": b"aaa", "flutter_infra_release/flutter/web/b.zip": b"bbbb"}
 
 
-def flutter_setup(build, tmp_path, machine, monkeypatch, *, release: str = RELEASE, asks: tuple[str, ...] = ("/flutter_infra_release/flutter/web/a.zip",)):
+def flutter_setup(
+    build, tmp_path, machine, monkeypatch, *, release: str = RELEASE, asks: tuple[str, ...] = ("/flutter_infra_release/flutter/web/a.zip",), precache: str = '["web"]'
+):
     """A fake Flutter origin, a locked row for it and an engine release; `flutter precache` is a fake that asks `asks`."""
     import hashlib
     import urllib.error
@@ -774,7 +776,7 @@ def flutter_setup(build, tmp_path, machine, monkeypatch, *, release: str = RELEA
     ]
     cfg = (
         f'[sdk]\ninstall = ["core", "app"]\ngroups = ["core", "app"]\ngit_urls = {{ flutter = "{origin.as_uri()}" }}\n'
-        f'[flutter]\nsdk_item = "app flutter"\nengine_release = "{release}"\nprecache = ["web"]\n'
+        f'[flutter]\nsdk_item = "app flutter"\nengine_release = "{release}"\nprecache = {precache}\n'
     )
     root = sdk_repo(build, tmp_path, rows, cfg)
     manifest = ["# path\tsha256\tsize\tasset"] + [
@@ -886,6 +888,21 @@ def test_a_sliced_agree_value_holds_a_ten_character_tag_to_the_row(build, tmp_pa
     (root / "Containerfile").write_text("ARG FLUTTER_IMAGE_TAG=33d7f282ab\n", encoding="utf-8")
     assert check(build, root) == 1
     assert "has ['33d7f282ab'], the lock 33d7f282aa" in capsys.readouterr().err
+
+def test_precache_names_the_platforms_for_one_call(build, tmp_path, machine, monkeypatch, capsys):
+    root, commit, _, runs, _ = flutter_setup(build, tmp_path, machine, monkeypatch, precache='["web", "windows"]')
+    prefix = tmp_path / "sdk"
+    assert install(build, root, prefix, "--precache", "web") == 0
+    assert [c[1:] for c, _, _ in runs if c[1] == "precache"] == [["precache", "--web"]], "the setting's windows is overridden"
+    capsys.readouterr()
+    assert install(build, root, prefix, "--precache", "web") == 0 and len(runs) == 3
+    assert install(build, root, prefix, "--check") == 1, "without the flag the setting still asks for windows"
+    out = capsys.readouterr().out
+    assert "flutter precache web" in out and "flutter precache windows" in out and "missing" in out
+    assert install(build, root, prefix, "--check", "--precache", "web,linux") == 1
+    out = capsys.readouterr().out
+    assert "flutter precache linux" in out and "flutter precache windows" not in out
+
 
 # --- a cargo tool of a group installed without the rust rows --------------------------------------------------------------
 

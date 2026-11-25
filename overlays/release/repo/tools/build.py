@@ -3683,6 +3683,7 @@ class Installer:
         # The deps checkout an item vendor's tool is built from (`--deps`), found only when a tool has to be built.
         self.deps_arg: Path | None = None
         self.deps_found: tuple[Path | None, str] | None = None
+        self.precache: list[str] = list(ctx.cfg.flutter.precache)
 
     def deps_checkout(self) -> tuple[Path | None, str]:
         if self.deps_found is None:
@@ -3968,9 +3969,9 @@ class Installer:
         if not cfg.engine_release:
             self.report("flutter precache", "not configured ([flutter] engine_release)")
             return
-        missing = precache_missing(directory, cfg.precache, arch, engine)
+        missing = precache_missing(directory, self.precache, arch, engine)
         if self.check or not missing:
-            for name in cfg.precache:
+            for name in self.precache:
                 if name in missing or "engine.stamp" in missing:
                     self.need(f"flutter precache {name}", f"missing, {missing.get(name) or missing['engine.stamp']}")
                 else:
@@ -3995,11 +3996,11 @@ class Installer:
                 "DART_SUPPRESS_ANALYTICS": "true",
             }
             run_tool([flutter, "config", "--no-analytics", "--no-cli-animations"], env, directory)
-            run_tool([flutter, "precache", *(f"--{p}" for p in cfg.precache)], env, directory)
+            run_tool([flutter, "precache", *(f"--{p}" for p in self.precache)], env, directory)
             run_tool([flutter, "--version"], env, directory)
         if misses:
             raise Problem("flutter asked the engine release for files it does not hold:\n" + "\n".join(f"  {m}" for m in sorted(set(misses))))
-        still = precache_missing(directory, cfg.precache, arch, engine)
+        still = precache_missing(directory, self.precache, arch, engine)
         if still:
             raise Problem("flutter precache left " + ", ".join(f"{k} ({v})" for k, v in still.items()))
         self.report("flutter precache", "installed")
@@ -4199,6 +4200,8 @@ def sdk_install(ctx: Ctx, args: argparse.Namespace) -> int:
     prefix = prefix.resolve() if prefix.is_absolute() else (Path.cwd() / prefix).resolve()
     install = Installer(ctx, items, plat, prefix, groups + ["system"], args.check, native)
     install.deps_arg = getattr(args, "deps", None)
+    if getattr(args, "precache", None) is not None:
+        install.precache = [p for p in args.precache.split(",") if p]
     if not args.check:
         (prefix / "dl").mkdir(parents=True, exist_ok=True)
     install.report("prefix", str(prefix) + (f" (SDK_HOME, {native['SDK_HOME'][1]})" if "SDK_HOME" in native and not args.prefix else ""))
@@ -4231,6 +4234,7 @@ def add_sdk(sub: argparse._SubParsersAction) -> None:
     install.add_argument("--prefix", metavar="DIR", help="where (default: SDK_HOME of `help env`, else $BUILD_SDK_HOME, else ~/.REPO-sdk)")
     install.add_argument("--check", action="store_true", help="install nothing: report what is missing and exit 1 if anything is")
     install.add_argument("--deps", type=Path, metavar="DIR", help="the deps checkout a [[deps.vendor]] item's tool is built from (default: `deps path`)")
+    install.add_argument("--precache", metavar="PLATFORMS", help="the Flutter platforms to precache and check, comma separated, for this call (default: [flutter] precache)")
     install.add_argument("--print-system", action="store_true", help="print the system packages to install, and nothing else")
     install.add_argument("--platform", metavar="OS-ARCH", help="act as this platform (default: this machine, or $BUILD_SDK_PLATFORM)")
     install.add_argument("--env", action="append", metavar="KEY=VALUE", help="set a native key of `help env` (SDK_HOME, VSINSTALLDIR, LLVM_DIR, ...); wins over the environment and the .env files")
