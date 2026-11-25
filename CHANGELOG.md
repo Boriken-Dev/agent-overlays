@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- engineering: the command `blob-scan <repo>` finds the blobs a malware or archive scanner may refuse (archives, encrypted data,
+  executables, key files, git packs, opaque binaries) in every ref of any repository, with nothing but git. `skills/blob-scan/SKILL.md`
+  says how it differs from the shared `build.py scan`.
+- engineering: the command `leak-check-history ROOT` scans the whole history (blobs, messages, paths, identities) of every
+  repository under ROOT with `leak-check`'s pattern file, and labels a hit in someone else's commit `UPSTREAM`. The owner's
+  identities are the pattern file's optional `ours` list, else `git config`.
+- release: `flutter/` and `kb/FLUTTER.md`: the tools that mirror Flutter's repository and engine artifacts, install an SDK from the
+  mirrors and build its container images (`flutter-mirror`, `flutter-artifacts`, `flutter-sdk`).
 - engineering: the command `context-check` warns about agent context files outside the standard places (`AGENTS.md` and
   `AGENTS.*.md` in a directory and in its `.agents`; `AGENTS_DIR` and `AGENTS_CONTEXT` change the names): another tool's file
   such as `CLAUDE.md`, `GEMINI.md` or `.cursorrules` (with where its text goes), a misnamed `agents.md`, and a `.agents` folder or

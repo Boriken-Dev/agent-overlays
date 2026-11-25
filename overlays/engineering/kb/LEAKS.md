@@ -128,6 +128,13 @@ The tool refuses the marker when the tree has a git remote or a packaging
 manifest, so it cannot silence a tree that ships. An honoured marker still
 prints every hit.
 
+## History, and what a scanner refuses
+
+`leak-check` reads the working tree and commit messages. `leak-check-history ROOT` reads every blob, message, path and identity in the
+full history of each repository under ROOT, with the same pattern file (`skills/leak-check/SKILL.md`). `blob-scan <repo>` looks for
+files a malware or archive scanner may refuse in any ref; a repository that adopted the shared `tools/build.py` has `build.py scan`
+instead (`skills/blob-scan/SKILL.md` says how they differ).
+
 ## What the scan does not cover
 
 - **History.** It reads the working tree and commit messages, not old blobs.
