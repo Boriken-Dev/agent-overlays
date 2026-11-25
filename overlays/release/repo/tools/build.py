@@ -541,6 +541,9 @@ CHECKSUM = ".cargo-checksum.json"
 CONFIG_MARK = "# Written by tools/build.py."
 MANIFEST = "manifest.json"
 MANIFEST_FORMAT = 1
+MANIFEST_FORMATS = (1, 2)
+# What `deps sync` writes into manifest.json; every other top-level key is another writer's and is kept.
+OWNED_KEYS = {"format", "sourceCommit", "cargoLockSha256", "crates", "gitSources", "vendors", "pub", "cdn", "trees"}
 # Directories at a package's top that compiling never reads, and at any depth the ones that hold
 # only test data.
 DROP_TOP = {
@@ -615,25 +618,34 @@ class Tree(NamedTuple):
 
 
 class Scan(NamedTuple):
-    """A whole commit: its crates/, and every path or file a scanner would refuse."""
+    """A whole commit: its vendor folders (`tree` is the first), and every path or file a scanner would refuse."""
 
     tree: Tree
     flagged: list[str]
+    trees: dict[str, Tree] = {}
 
 
 def read_lock(path: Path) -> Lock:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise Problem(f"{path}: {error}") from error
+    return parse_lock(text, path.name, str(path))
+
+
+def parse_lock(text: str, file_name: str, label: str = "") -> Lock:
     lock = Lock([], {}, {})
     try:
-        packages = tomllib.loads(path.read_text(encoding="utf-8")).get("package", [])
-    except (OSError, tomllib.TOMLDecodeError) as error:
-        raise Problem(f"{path}: {error}") from error
+        packages = tomllib.loads(text).get("package", [])
+    except tomllib.TOMLDecodeError as error:
+        raise Problem(f"{label or file_name}: {error}") from error
     for package in packages:
         name, version, source = package["name"], package["version"], package.get("source")
         if source is None:
             continue
         if source == CRATES_IO:
             if "checksum" not in package:
-                raise Problem(f"{path.name} gives {name} {version} no checksum")
+                raise Problem(f"{file_name} gives {name} {version} no checksum")
             lock.crates.append(Crate(name, version, package["checksum"]))
         elif source.startswith("git+"):
             parts = urllib.parse.urlsplit(source.removeprefix("git+"))
@@ -719,10 +731,10 @@ def read_dir(crates: Path, deep: bool = True, allow: Allow | None = None) -> Tre
 
 
 def package_problems(
-    tree: Tree, name: str, checksum: str | None, repo: Repo | None, deep: bool = True
+    tree: Tree, name: str, checksum: str | None, repo: Repo | None, deep: bool = True, folder: str = "crates"
 ) -> list[str]:
     """What keeps one directory from being the package Cargo.lock names, for a line each."""
-    where = f"crates/{name}"
+    where = f"{folder}/{name}"
     if name not in tree.dirs:
         return [f"{where}: missing, Cargo.lock names it"]
     sums = tree.sums.get(name)
@@ -748,16 +760,16 @@ def package_problems(
     return found
 
 
-def problems(lock: Lock, tree: Tree, deep: bool = True) -> list[str]:
-    """One line for each thing keeping a crates/ from covering Cargo.lock, and nothing more."""
+def problems(lock: Lock, tree: Tree, deep: bool = True, folder: str = "crates") -> list[str]:
+    """One line for each thing keeping a vendor folder from covering its Cargo.lock, and nothing more."""
     found = []
     wanted = wanted_packages(lock)
     for name, (checksum, repo) in wanted.items():
-        found += package_problems(tree, name, checksum, repo, deep)
+        found += package_problems(tree, name, checksum, repo, deep, folder)
     for name in sorted(set(tree.dirs) - set(wanted)):
-        found.append(f"crates/{name}: stale, Cargo.lock does not name it")
+        found.append(f"{folder}/{name}: stale, Cargo.lock does not name it")
     for name in sorted(tree.loose):
-        found.append(f"crates/{name}: a file; a vendor directory holds only package directories")
+        found.append(f"{folder}/{name}: a file; a vendor directory holds only package directories")
     return found
 
 
@@ -817,13 +829,13 @@ def has_commit(checkout: Path, commit: str) -> bool:
     return git_ok("cat-file", "-e", f"{commit}^{{commit}}", cwd=checkout)
 
 
-def scan_ref(checkout: Path, commit: str, allow: Allow | None = None) -> Scan | None:
-    """A commit's crates/ and everything in it a scanner would refuse; None when it is not here."""
+def scan_ref(checkout: Path, commit: str, allow: Allow | None = None, folders: tuple[str, ...] | list[str] = ("crates",)) -> Scan | None:
+    """A commit's vendor folders and everything in it a scanner would refuse; None when it is not here."""
     allow = allow or Allow()
     if not has_commit(checkout, commit):
         return None
-    tree = empty_tree()
-    adder = Adder(tree, allow)
+    trees = {folder: empty_tree() for folder in folders}
+    adders = {folder: Adder(trees[folder], allow, f"{folder}/") for folder in folders}
     flagged = []
     entries = commit_entries(checkout, commit)
     for (path, mode, _), (_, body) in zip(entries, batch_bodies(checkout, [e[2] for e in entries])):
@@ -833,9 +845,10 @@ def scan_ref(checkout: Path, commit: str, allow: Allow | None = None) -> Scan | 
             flagged.append(f"{path}: a symbolic link")
         elif (kind := flagged_kind(body, path.rsplit("/", 1)[-1])) and not allow.permits(path, kind):
             flagged.append(f"{path}: {kind}")
-        if path.startswith("crates/"):
-            adder.add(path.removeprefix("crates/"), body)
-    return Scan(tree, flagged)
+        for folder, adder in adders.items():
+            if path.startswith(f"{folder}/"):
+                adder.add(path.removeprefix(f"{folder}/"), body)
+    return Scan(trees[folders[0]], flagged, trees)
 
 
 # --- turning a package into a vendor directory ---------------------------------------------------------
@@ -1350,9 +1363,9 @@ def untrimmed(crates: Path, tree: Tree, name: str) -> bool:
     return set(include_closure(files)) != set(files)
 
 
-def sync_crates(deps_dir: Path, lock: Lock, template: str, jobs: int) -> list[str]:
-    """Makes deps_dir/crates cover the lock and hold nothing else; returns a line per change."""
-    crates = deps_dir / "crates"
+def sync_crates(deps_dir: Path, lock: Lock, template: str, jobs: int, folder: str = "crates") -> list[str]:
+    """Makes deps_dir/FOLDER cover the lock and hold nothing else; returns a line per change."""
+    crates = deps_dir / folder
     wanted = wanted_packages(lock)
     crates.mkdir(parents=True, exist_ok=True)
     for entry in sorted(crates.iterdir()):
@@ -1386,7 +1399,18 @@ SCHEMA["deps"] = Key(
         "branch": Key("str", "deps", "The orphan branch that holds the vendored files."),
         "source_name": Key("str", "vendored", "The name of the cargo source the written cargo config replaces crates.io with."),
         "crates_url": Key("str", "", "A mirror of crates.io's .crate files, with {name} and {version}; the environment variable BUILD_CRATES_URL wins."),
-        "cargo_lock": Key("str", "Cargo.lock", "The lock the deps branch must cover, relative to the repository."),
+        "cargo_lock": Key("str", "Cargo.lock", "The lock the deps branch's crates/ must cover, relative to the repository; unused when [[deps.vendor]] lists vendors."),
+        "vendor": Key(
+            "tables",
+            None,
+            "A vendor folder on the deps branch and the lock it covers; the first is the primary one (`deps use`, `offline`, `release build --offline`). Empty: one vendor, `crates`, covering `cargo_lock`.",
+            {
+                "folder": Key("str", REQUIRED, "The folder on the deps branch (one path segment, unique)."),
+                "lock": Key("str", "", "The Cargo.lock it covers, relative to the repository. Exactly one of `lock` and `item`."),
+                "item": Key("str", "", "An SDK lock row, `GROUP NAME`, naming a crate `cargo install --locked` builds: its lock is the Cargo.lock packaged in FOLDER/NAME-VERSION/, and the row's SHA-256 is the .crate file's checksum."),
+                "bin": Key("str", "", "The binary an `item` installs; empty: the row's name."),
+            },
+        ),
         "checkout": Key("str", "", "Where the deps branch is checked out; the environment variable BUILD_DEPS wins. Empty: a detached worktree beside the repository, named REPO-deps."),
         "allow": Key("strs", [], "Files a scan lets through, as GLOB:KIND (for example cdn/www.gstatic.com/flutter-canvaskit/*:wasm)."),
         "jobs": Key("int", 8, "Packages fetched at once."),
@@ -1476,57 +1500,252 @@ class RefView:
 DEPS_CHECKS: list[Callable[[Ctx, Any, Any], tuple[list[str], list[str]]]] = []
 
 
-def manifest_problems(text: bytes | None, lock: Lock) -> tuple[list[str], list[str]]:
-    """(problems, notes) about manifest.json: absent is a note, wrong is a problem."""
+class Vendor(NamedTuple):
+    """One vendor folder of the deps branch and where its lock comes from: a file (`lock`) or a crate (`item`)."""
+
+    folder: str
+    lock: str
+    item: str
+    bin: str
+
+
+def vendors_of(ctx: Ctx) -> list[Vendor]:
+    """The configured vendors, or the one `crates` over `[deps] cargo_lock`."""
+    cfg = ctx.cfg.deps
+    if not cfg.vendor:
+        return [Vendor("crates", cfg.cargo_lock, "", "")]
+    seen: set[str] = set()
+    vendors = []
+    for index, table in enumerate(cfg.vendor):
+        where = f"deps.vendor[{index}]"
+        if not table.folder or "/" in table.folder or "\\" in table.folder or table.folder in (".", "..") or table.folder.startswith("."):
+            raise Problem(f"{where}: folder {table.folder!r} is not one path segment")
+        if table.folder in seen:
+            raise Problem(f"{where}: folder {table.folder} is listed twice")
+        if bool(table.lock) == bool(table.item):
+            raise Problem(f"{where} ({table.folder}): name exactly one of lock and item")
+        seen.add(table.folder)
+        vendors.append(Vendor(table.folder, table.lock, table.item, table.bin))
+    return vendors
+
+
+def chosen_vendors(ctx: Ctx, args: Any, every: bool) -> list[Vendor]:
+    """The vendors a command covers: --vendor's one, else all (`every`) or the primary."""
+    vendors = vendors_of(ctx)
+    wanted = getattr(args, "vendor", None)
+    if wanted is None:
+        return vendors if every else vendors[:1]
+    found = [v for v in vendors if v.folder == wanted]
+    if not found:
+        raise Usage(f"unknown vendor {wanted}; the folders are {', '.join(v.folder for v in vendors)}")
+    return found
+
+
+def lock_overrides(ctx: Ctx, args: Any) -> dict[str, Path]:
+    """`--cargo-lock FILE` replaces the lock of the vendor --vendor names, else of the primary one."""
+    given = getattr(args, "cargo_lock", None)
+    if given is None:
+        return {}
+    vendors = vendors_of(ctx)
+    wanted = getattr(args, "vendor", None) or vendors[0].folder
+    for vendor in vendors:
+        if vendor.folder == wanted:
+            if vendor.item:
+                raise Usage(f"--cargo-lock cannot replace {vendor.folder}: its lock is the one packaged in {vendor.item}")
+            return {vendor.folder: given.resolve()}
+    return {}
+
+
+def item_row(ctx: Ctx, vendor: Vendor) -> "Item":
+    group, name = split_item(vendor.item)
+    rows = [i for i in read_sdk_lock(ctx) if i.group == group and i.name == name]
+    if len(rows) != 1:
+        raise Problem(f"{ctx.cfg.sdk.lock}: {vendor.folder} needs one `{vendor.item}` row, found {len(rows)}")
+    return rows[0]
+
+
+def packaged_lock(vendor: Vendor, row: "Item") -> str:
+    return f"{vendor.folder}/{row.name}-{row.version}/Cargo.lock"
+
+
+def vendor_lock_file(ctx: Ctx, vendor: Vendor, deps_dir: Path, override: Path | None = None) -> Path:
+    if vendor.item:
+        return deps_dir / packaged_lock(vendor, item_row(ctx, vendor))
+    return override or ctx.root / vendor.lock
+
+
+def vendor_lock(ctx: Ctx, vendor: Vendor, view: Any, override: Path | None = None, notes: list[str] | None = None) -> tuple[Lock, bytes]:
+    """The lock a vendor folder has to cover, and the bytes its hash is taken from.
+
+    An item vendor reads the Cargo.lock packaged in the crate's own directory on the deps branch (through `view`),
+    and its lock also holds the crate itself, which is what the SDK lock's row names.
+    """
+    if vendor.lock:
+        path = override or ctx.root / vendor.lock
+        lock = read_lock(path)
+        return lock, path.read_bytes()
+    row = item_row(ctx, vendor)
+    where = packaged_lock(vendor, row)
+    data = view.read(where)
+    if data is None:
+        raise Problem(f"{where}: missing, {vendor.folder} is the {vendor.item} crate and its lock; run `deps sync`")
+    lock = parse_lock(data.decode("utf-8", "replace"), "Cargo.lock", where)
+    checksum = row.sha256
+    if checksum == "-":
+        recorded = view.read(f"{vendor.folder}/{row.name}-{row.version}/{CHECKSUM}")
+        try:
+            checksum = json.loads(recorded or b"{}").get("package") or "-"
+        except ValueError:
+            checksum = "-"
+        if notes is not None:
+            notes.append(f"{ctx.cfg.sdk.lock}: the `{vendor.item}` row has no SHA-256, so {vendor.folder} is not held to the crate's checksum")
+    if not any(c.name == row.name and c.version == row.version for c in lock.crates):
+        lock.crates.append(Crate(row.name, row.version, checksum))
+    return lock, data
+
+
+def vendor_problems(
+    ctx: Ctx, view: Any, tree_of: Callable[[str], Tree], overrides: dict[str, Path], deep: bool, vendors: list[Vendor], notes: list[str]
+) -> tuple[list[str], dict[str, tuple[Lock, bytes]]]:
+    """What keeps each vendor folder from covering its lock, and the locks that could be read."""
+    found: list[str] = []
+    locks: dict[str, tuple[Lock, bytes]] = {}
+    for vendor in vendors:
+        try:
+            locks[vendor.folder] = vendor_lock(ctx, vendor, view, overrides.get(vendor.folder), notes)
+        except Problem as problem:
+            found.append(str(problem))
+            continue
+        found += problems(locks[vendor.folder][0], tree_of(vendor.folder), deep, vendor.folder)
+    return found, locks
+
+
+def lock_label(ctx: Ctx, vendors: list[Vendor], overrides: dict[str, Path]) -> str:
+    shown = (lambda v: v.lock) if ctx.cfg.deps.vendor else (lambda v: Path(v.lock).name)
+    names = [overrides[v.folder].name if v.folder in overrides else shown(v) if v.lock else f"the {v.item} crate's lock" for v in vendors]
+    return ", ".join(dict.fromkeys(names))
+
+
+def format_two(ctx: Ctx) -> bool:
+    """Whether the manifest is written as format 2: several vendors, or anything format 1 has no place for."""
+    cfg = ctx.cfg.deps
+    return bool(cfg.vendor or cfg.get("tree"))
+
+
+def manifest_problems(text: bytes | None, ctx: Ctx, locks: dict[str, tuple[Lock, bytes]], vendors: list[Vendor]) -> tuple[list[str], list[str]]:
+    """(problems, notes) about manifest.json: absent is a note, wrong is a problem.
+
+    Format 1 holds the counts of the one lock; format 2 holds them per vendor, and a vendor it does not
+    record (another writer's manifest) is a note.
+    """
     if text is None:
         return [], [f"no {MANIFEST} on the deps branch; `deps refresh` writes one"]
     try:
         data = json.loads(text)
     except ValueError:
         return [f"{MANIFEST}: not JSON"], []
-    found = []
-    if data.get("format") != MANIFEST_FORMAT:
-        found.append(f"{MANIFEST}: format {data.get('format')}, this tool reads {MANIFEST_FORMAT}")
-    if data.get("crates") != len(lock.crates) or data.get("gitSources") != len(lock.repos):
-        found.append(
-            f"{MANIFEST}: says {data.get('crates')} crates and {data.get('gitSources')} git sources, "
-            f"Cargo.lock names {len(lock.crates)} and {len(lock.repos)}"
-        )
-    return found, []
+    if not isinstance(data, dict):
+        return [f"{MANIFEST}: not a JSON object"], []
+    found: list[str] = []
+    notes: list[str] = []
+    if data.get("format") not in MANIFEST_FORMATS:
+        return [f"{MANIFEST}: format {data.get('format')}, this tool reads 1 and 2"], []
+    if data["format"] == 1:
+        primary = next((locks[v.folder][0] for v in vendors if v.folder in locks), None)
+        if primary and (data.get("crates") != len(primary.crates) or data.get("gitSources") != len(primary.repos)):
+            found.append(
+                f"{MANIFEST}: says {data.get('crates')} crates and {data.get('gitSources')} git sources, "
+                f"Cargo.lock names {len(primary.crates)} and {len(primary.repos)}"
+            )
+        return found, notes
+    recorded = data.get("vendors") if isinstance(data.get("vendors"), dict) else {}
+    for vendor in vendors:
+        if vendor.folder not in locks:
+            continue
+        lock = locks[vendor.folder][0]
+        entry = recorded.get(vendor.folder)
+        if not isinstance(entry, dict):
+            notes.append(f"{MANIFEST} does not record {vendor.folder}")
+        elif entry.get("crates") != len(lock.crates) or entry.get("gitSources") != len(lock.repos):
+            found.append(
+                f"{MANIFEST}: {vendor.folder}: says {entry.get('crates')} crates and {entry.get('gitSources')} git sources, "
+                f"its lock names {len(lock.crates)} and {len(lock.repos)}"
+            )
+    return found, notes
 
 
-def write_manifest(deps_dir: Path, ctx: Ctx, lock: Lock, lock_path: Path, extra: dict) -> None:
+def write_manifest(deps_dir: Path, ctx: Ctx, entries: dict[str, dict], extra: dict) -> None:
     """manifest.json at the root of the deps branch. `sourceCommit` is where main stood when the
-    contents last changed, so a commit that changes nothing else leaves the file as it was."""
+    contents last changed, so a commit that changes nothing else leaves the file as it was.
+
+    Keys this tool does not own stay as another writer left them; an owned section that is turned off disappears.
+    `entries` is the record of each vendor synced; the others keep their old record.
+    """
     commit = run_git("rev-parse", "HEAD", cwd=ctx.root) if git_ok("rev-parse", "HEAD", cwd=ctx.root) else ""
-    data = {
-        "format": MANIFEST_FORMAT,
-        "sourceCommit": commit,
-        "cargoLockSha256": sha256(lock_path.read_bytes()),
-        "crates": len(lock.crates),
-        "gitSources": len(lock.repos),
-        **extra,
-    }
     path = deps_dir / MANIFEST
     try:
         old = json.loads(path.read_bytes())
     except (OSError, ValueError):
         old = None
-    if isinstance(old, dict) and {**old, "sourceCommit": ""} == {**data, "sourceCommit": ""}:
+    if not isinstance(old, dict):
+        old = {}
+    if format_two(ctx):
+        previous = old.get("vendors") if old.get("format") == 2 and isinstance(old.get("vendors"), dict) else {}
+        folders = [v.folder for v in vendors_of(ctx)]
+        recorded = {f: entries.get(f) or previous.get(f) for f in folders if entries.get(f) or previous.get(f)}
+        owned = {"format": 2, "sourceCommit": commit, "vendors": recorded, **extra}
+    else:
+        entry = entries["crates"]
+        owned = {
+            "format": MANIFEST_FORMAT,
+            "sourceCommit": commit,
+            "cargoLockSha256": entry["lockSha256"],
+            "crates": entry["crates"],
+            "gitSources": entry["gitSources"],
+            **extra,
+        }
+    data = {**{k: v for k, v in old.items() if k not in OWNED_KEYS}, **owned}
+    if old and {**old, "sourceCommit": ""} == {**data, "sourceCommit": ""}:
         return
     path.write_bytes((json.dumps(data, indent=2, sort_keys=True) + "\n").encode("utf-8"))
 
 
-def deps_sync_all(ctx: Ctx, deps_dir: Path, lock: Lock, lock_path: Path, args: argparse.Namespace | None = None) -> list[str]:
-    """Crates, then the pub and CDN files when configured, then manifest.json; a line per change."""
+def deps_sync_all(ctx: Ctx, deps_dir: Path, args: argparse.Namespace | None = None) -> list[str]:
+    """Each vendor folder, then the pub and CDN files when configured, then manifest.json; a line per change."""
     cfg = ctx.cfg.deps
-    changes = sync_crates(deps_dir, lock, settings_crates_url(ctx.cfg), cfg.jobs)
+    template = settings_crates_url(ctx.cfg)
+    overrides = lock_overrides(ctx, args)
+    view = DirView(deps_dir)
+    changes: list[str] = []
+    entries: dict[str, dict] = {}
+    for vendor in chosen_vendors(ctx, args, True):
+        if vendor.item:
+            row = item_row(ctx, vendor)
+            if row.sha256 == "-":
+                raise Problem(
+                    f"{ctx.cfg.sdk.lock}:{row.line}: the `{vendor.item}` row has no SHA-256; it is the .crate file's `cksum` "
+                    f"in the crates.io index (https://index.crates.io/)"
+                )
+            crate = Crate(row.name, row.version, row.sha256)
+            folder = deps_dir / vendor.folder
+            have = read_dir(folder, False)
+            if package_problems(have, crate.dir, crate.checksum, None, False, vendor.folder):
+                shutil.rmtree(folder / crate.dir, ignore_errors=True)
+                materialize_crate(crate, folder, template)
+        lock, data = vendor_lock(ctx, vendor, view, overrides.get(vendor.folder))
+        changes += sync_crates(deps_dir, lock, template, cfg.jobs, vendor.folder)
+        entries[vendor.folder] = {
+            ("item" if vendor.item else "lock"): vendor.item or vendor.lock,
+            "lockSha256": sha256(data),
+            "crates": len(lock.crates),
+            "gitSources": len(lock.repos),
+        }
     extra: dict = {}
     for sync in DEPS_SYNCS:
         more, info = sync(ctx, deps_dir, args)
         changes += more
         extra.update(info)
-    write_manifest(deps_dir, ctx, lock, lock_path, extra)
+    write_manifest(deps_dir, ctx, entries, extra)
     return changes
 
 
@@ -1556,14 +1775,15 @@ def config_text(ctx: Ctx, lock: Lock, crates: Path) -> str:
 
 
 def use_crates(
-    ctx: Ctx, deps_dir: Path, lock: Lock, lock_path: Path, out: Path | None = None, repo_config: bool = False, full: bool = False
+    ctx: Ctx, deps_dir: Path, lock: Lock, lock_path: Path, out: Path | None = None, repo_config: bool = False, full: bool = False,
+    folder: str = "crates",
 ) -> dict:
-    """Writes a cargo home whose config builds from deps_dir/crates, only when it covers the lock.
+    """Writes a cargo home whose config builds from deps_dir/FOLDER, only when it covers the lock.
 
     The check reads each package's metadata; `full` also re-hashes every file.
     """
-    crates = (deps_dir / "crates").resolve()
-    found = problems(lock, read_dir(crates, full, Allow(ctx.cfg.deps.allow)), full)
+    crates = (deps_dir / folder).resolve()
+    found = problems(lock, read_dir(crates, full, Allow(ctx.cfg.deps.allow)), full, folder)
     if found:
         raise Problem("; ".join(found[:5]) + f" ({len(found)} in all); run `deps sync` first")
     root = ctx.root.resolve()
@@ -1588,76 +1808,119 @@ def use_crates(
     return info
 
 
-def ref_problems(ctx: Ctx, lock: Lock, commit: str) -> tuple[list[str], list[str]]:
-    """What keeps a commit of the repository from being a deps branch covering the lock."""
-    scan = scan_ref(ctx.root, commit, Allow(ctx.cfg.deps.allow))
+def ref_coverage(
+    ctx: Ctx, overrides: dict[str, Path], commit: str, vendors: list[Vendor] | None = None
+) -> tuple[list[str], list[str], dict[str, tuple[Lock, bytes]]]:
+    """What keeps a commit of the repository from being a deps branch covering every vendor's lock."""
+    vendors = vendors if vendors is not None else vendors_of(ctx)
+    scan = scan_ref(ctx.root, commit, Allow(ctx.cfg.deps.allow), [v.folder for v in vendors])
     if scan is None:
-        return [f"deps at {commit[:12]} is not here: git fetch --depth 1 origin {commit}"], []
+        return [f"deps at {commit[:12]} is not here: git fetch --depth 1 origin {commit}"], [], {}
     label = f"deps at {commit[:12]}"
-    found = [f"{label}: {line}" for line in problems(lock, scan.tree)]
-    found += [f"{label}: {line}; the branch holds no such file" for line in scan.flagged]
     view = RefView(ctx.root, commit)
-    more, notes = manifest_problems(view.read(MANIFEST), lock)
+    notes: list[str] = []
+    covered, locks = vendor_problems(ctx, view, lambda folder: scan.trees[folder], overrides, True, vendors, notes)
+    found = [f"{label}: {line}" for line in covered]
+    found += [f"{label}: {line}; the branch holds no such file" for line in scan.flagged]
+    more, more_notes = manifest_problems(view.read(MANIFEST), ctx, locks, vendors)
     found += [f"{label}: {line}" for line in more]
+    notes += more_notes
+    primary = locks[vendors[0].folder][0] if vendors[0].folder in locks else Lock([], {}, {})
     for check in DEPS_CHECKS:
-        extra, extra_notes = check(ctx, view, lock)
+        extra, extra_notes = check(ctx, view, primary)
         found += [f"{label}: {line}" for line in extra]
         notes += extra_notes
+    return found, notes, locks
+
+
+def ref_problems(ctx: Ctx, overrides: dict[str, Path] | None, commit: str, vendors: list[Vendor] | None = None) -> tuple[list[str], list[str]]:
+    found, notes, _ = ref_coverage(ctx, overrides or {}, commit, vendors)
     return found, notes
 
 
-def dir_problems(ctx: Ctx, deps: Path, lock: Lock, deep: bool = True) -> tuple[list[str], list[str]]:
-    """What keeps a deps checkout from covering the lock: (problems, notes)."""
-    found = problems(lock, read_dir(deps / "crates", deep, Allow(ctx.cfg.deps.allow)), deep)
+def dir_coverage(
+    ctx: Ctx, deps: Path, overrides: dict[str, Path], deep: bool = True, vendors: list[Vendor] | None = None
+) -> tuple[list[str], list[str], dict[str, tuple[Lock, bytes]]]:
+    """What keeps a deps checkout from covering every vendor's lock: (problems, notes, the locks read)."""
+    vendors = vendors if vendors is not None else vendors_of(ctx)
     view = DirView(deps)
-    more, notes = manifest_problems(view.read(MANIFEST), lock)
+    allow = Allow(ctx.cfg.deps.allow)
+    notes: list[str] = []
+    found, locks = vendor_problems(ctx, view, lambda folder: read_dir(deps / folder, deep, allow), overrides, deep, vendors, notes)
+    more, more_notes = manifest_problems(view.read(MANIFEST), ctx, locks, vendors)
     found += more
+    notes += more_notes
+    primary = locks[vendors[0].folder][0] if vendors[0].folder in locks else Lock([], {}, {})
     for check in DEPS_CHECKS:
-        extra, extra_notes = check(ctx, view, lock)
+        extra, extra_notes = check(ctx, view, primary)
         found += extra
         notes += extra_notes
+    return found, notes, locks
+
+
+def dir_problems(ctx: Ctx, deps: Path, overrides: dict[str, Path] | None, deep: bool = True, vendors: list[Vendor] | None = None) -> tuple[list[str], list[str]]:
+    """What keeps a deps checkout from covering the locks: (problems, notes)."""
+    found, notes, _ = dir_coverage(ctx, deps, overrides or {}, deep, vendors)
     return found, notes
 
 
-def lock_path_of(ctx: Ctx, args: argparse.Namespace) -> Path:
+def prepare(ctx: Ctx, args: argparse.Namespace) -> None:
     ctx.pubspec_lock = getattr(args, "pubspec_lock", None)
     ctx.quick = bool(getattr(args, "quick", False))
-    return args.cargo_lock.resolve() if args.cargo_lock else ctx.root / ctx.cfg.deps.cargo_lock
 
 
 def deps_sync(ctx: Ctx, args: argparse.Namespace) -> int:
-    path = lock_path_of(ctx, args)
-    lock = read_lock(path)
+    prepare(ctx, args)
     deps = find_deps(ctx, args.deps)
-    changes = deps_sync_all(ctx, deps, lock, path, args)
+    vendors = chosen_vendors(ctx, args, True)
+    changes = deps_sync_all(ctx, deps, args)
     for change in changes:
         print(change)
-    print(f"ok: {len(lock.crates)} crates, {len(lock.repos)} git sources, {len(changes)} changed")
+    if not ctx.cfg.deps.vendor:
+        lock = read_lock(lock_overrides(ctx, args).get("crates") or ctx.root / ctx.cfg.deps.cargo_lock)
+        print(f"ok: {len(lock.crates)} crates, {len(lock.repos)} git sources, {len(changes)} changed")
+    else:
+        print(f"ok: {', '.join(v.folder for v in vendors)}, {len(changes)} changed")
     return 0
 
 
 def deps_check(ctx: Ctx, args: argparse.Namespace) -> int:
-    path = lock_path_of(ctx, args)
-    lock = read_lock(path)
+    prepare(ctx, args)
+    vendors = chosen_vendors(ctx, args, True)
+    overrides = lock_overrides(ctx, args)
     if args.ref:
         if args.quick:
             raise Usage("--quick reads a checkout's metadata; --ref reads every file of a commit")
-        found, notes = ref_problems(ctx, lock, args.ref)
+        found, notes, locks = ref_coverage(ctx, overrides, args.ref, vendors)
     else:
-        found, notes = dir_problems(ctx, find_deps(ctx, args.deps), lock, not args.quick)
+        found, notes, locks = dir_coverage(ctx, find_deps(ctx, args.deps), overrides, not args.quick, vendors)
     for note in notes:
         print(f"note: {note}")
     if found:
         raise Problem("\n".join(found))
-    print(f"ok: {len(lock.crates)} crates, {len(lock.repos)} git sources cover {path.name}")
+    if not ctx.cfg.deps.vendor:
+        lock = locks["crates"][0]
+        print(f"ok: {len(lock.crates)} crates, {len(lock.repos)} git sources cover {lock_label(ctx, vendors, overrides)}")
+    else:
+        for vendor in vendors:
+            lock = locks[vendor.folder][0]
+            print(f"ok: {vendor.folder} {len(lock.crates)} crates, {len(lock.repos)} git sources cover {lock_label(ctx, [vendor], overrides)}")
     return 0
 
 
+def use_vendor(
+    ctx: Ctx, deps: Path, vendor: Vendor, override: Path | None, out: Path | None, repo_config: bool = False, full: bool = False
+) -> dict:
+    """`use_crates` for one vendor: the lock is read from the repository, or from the crate an item vendor is."""
+    lock, _ = vendor_lock(ctx, vendor, DirView(deps), override)
+    return use_crates(ctx, deps, lock, vendor_lock_file(ctx, vendor, deps, override), out, repo_config, full, vendor.folder)
+
+
 def deps_use(ctx: Ctx, args: argparse.Namespace) -> int:
-    path = lock_path_of(ctx, args)
-    lock = read_lock(path)
+    prepare(ctx, args)
     deps = find_deps(ctx, args.deps)
-    info = use_crates(ctx, deps, lock, path, args.out, args.repo_config, args.full)
+    vendor = chosen_vendors(ctx, args, False)[0]
+    info = use_vendor(ctx, deps, vendor, lock_overrides(ctx, args).get(vendor.folder), args.out, args.repo_config, args.full)
     if args.json:
         print(json.dumps(info, indent=2))
         return 0
@@ -1699,16 +1962,19 @@ def deps_refresh(ctx: Ctx, args: argparse.Namespace) -> int:
     commit cannot hold its own hash.
     """
     cfg = ctx.cfg.deps
-    lock_path = lock_path_of(ctx, args)
-    lock = read_lock(lock_path)
+    prepare(ctx, args)
+    vendors = vendors_of(ctx)
+    overrides = lock_overrides(ctx, args)
+    covers = lock_label(ctx, vendors, overrides)
+    folders = [v.folder for v in vendors]
     deps = find_deps(ctx, args.deps)
     if not git_ok("symbolic-ref", "-q", "HEAD", cwd=deps):
         raise Problem(f"{deps} is not on a branch; `deps init` makes one, or git -C {deps} checkout -B {cfg.branch} origin/{cfg.branch}")
-    generated = ["crates", "pub", "cdn", MANIFEST]
+    generated = [*folders, "pub", "cdn", MANIFEST]
     dirty = run_git("status", "--porcelain", "--", ".", *[f":!{g}" for g in generated], cwd=deps)
     if dirty:
         raise Problem(f"{deps} has changes outside {', '.join(generated)}: {dirty.splitlines()[0]}")
-    changes = deps_sync_all(ctx, deps, lock, lock_path, args)
+    changes = deps_sync_all(ctx, deps, args)
     for change in changes:
         print(change)
     source = run_git("rev-parse", "--short=8", "HEAD", cwd=ctx.root)
@@ -1722,15 +1988,17 @@ def deps_refresh(ctx: Ctx, args: argparse.Namespace) -> int:
     if pin_lock:
         text = pin_lock.read_bytes().decode("utf-8")
         pinned = pin_row(text, cfg.pin.item)[2]
-        scan = scan_ref(ctx.root, pinned, Allow(cfg.allow)) if has_commit(ctx.root, pinned) else None
-        if not committed and scan is not None and not problems(lock, scan.tree) and not scan.flagged:
-            print(f"current: deps {pinned} covers {lock_path.name}")
-            return 0
+        scan = scan_ref(ctx.root, pinned, Allow(cfg.allow), folders) if has_commit(ctx.root, pinned) else None
+        if not committed and scan is not None and not scan.flagged:
+            held, _ = vendor_problems(ctx, RefView(ctx.root, pinned), lambda folder: scan.trees[folder], overrides, True, vendors, [])
+            if not held:
+                print(f"current: deps {pinned} covers {covers}")
+                return 0
     pin = run_git("rev-parse", "HEAD", cwd=deps)
     if not pin_lock and not committed:
-        found, _ = ref_problems(ctx, lock, pin) if has_commit(ctx.root, pin) else ([f"deps {pin} is not in this repository"], [])
+        found, _ = ref_problems(ctx, overrides, pin) if has_commit(ctx.root, pin) else ([f"deps {pin} is not in this repository"], [])
         if not found:
-            print(f"current: deps {pin} covers {lock_path.name}")
+            print(f"current: deps {pin} covers {covers}")
             return 0
     repinned = []
     for rule in cfg.repin:
@@ -1753,9 +2021,9 @@ def deps_refresh(ctx: Ctx, args: argparse.Namespace) -> int:
         row = pin_row(text, cfg.pin.item)
         pin_lock.write_bytes((text[: row.start(2)] + pin + text[row.end(2) :]).encode("utf-8"))
         run_git("commit", "-q", "-m", f"chore: {Path(cfg.pin.lock).name} pins deps at {short(pin)}", "--", cfg.pin.lock, cwd=ctx.root)
-    found, _ = ref_problems(ctx, lock, pin)
+    found, _ = ref_problems(ctx, overrides, pin)
     if found:
-        raise Problem(f"deps {pin} does not cover {lock_path.name}: {found[0]}")
+        raise Problem(f"deps {pin} does not cover {covers}: {found[0]}")
     print(f"pinned deps {pin}; push {deps}'s branch to {cfg.branch} first, not rebased, then this one")
     return 0
 
@@ -1906,15 +2174,17 @@ def add_deps(sub: argparse._SubParsersAction) -> None:
     common.add_argument("--cargo-lock", type=Path, metavar="FILE", help="read this Cargo.lock instead of the repository's")
     common.add_argument("--deps", type=Path, metavar="DIR", help="the deps checkout (default: `deps path`)")
     common.add_argument("--pubspec-lock", type=Path, metavar="FILE", help="read this pubspec.lock instead of [deps.pub] lock")
+    only = argparse.ArgumentParser(add_help=False)
+    only.add_argument("--vendor", metavar="FOLDER", help="only this [[deps.vendor]] folder (default: every vendor; `use` takes the first); --cargo-lock then replaces its lock")
     pub_cache = argparse.ArgumentParser(add_help=False)
     pub_cache.add_argument("--pub-cache", type=Path, metavar="DIR", help="the pub cache the pub packages are copied from (default: [deps.pub] cache, $PUB_CACHE, the platform's)")
-    sync = commands.add_parser("sync", parents=[common, pub_cache], help="make the deps checkout match Cargo.lock (and the pub packages and CDN files): fetch, verify, remove")
+    sync = commands.add_parser("sync", parents=[common, only, pub_cache], help="make the deps checkout match Cargo.lock (and the pub packages and CDN files): fetch, verify, remove")
     sync.set_defaults(run=deps_sync)
-    check = commands.add_parser("check", parents=[common], help="fail, naming what is missing, changed or stale")
+    check = commands.add_parser("check", parents=[common, only], help="fail, naming what is missing, changed or stale")
     check.add_argument("--quick", action="store_true", help="read each package's metadata only, without re-hashing its files")
     check.add_argument("--ref", metavar="REF", help="check a commit of this repository instead of the checkout")
     check.set_defaults(run=deps_check)
-    use = commands.add_parser("use", parents=[common], help="write a cargo home that replaces every source by the checkout's crates/")
+    use = commands.add_parser("use", parents=[common, only], help="write a cargo home that replaces every source by a vendor folder of the checkout")
     use.add_argument("--out", type=Path, metavar="DIR", help="where to write it (default: a directory in the system temp dir named for the lock)")
     use.add_argument("--repo-config", action="store_true", help="also write the repository's .cargo/config.toml")
     use.add_argument("--json", action="store_true", help="print the result as JSON")
@@ -2320,7 +2590,8 @@ def seed(source: Path, target: Path) -> None:
 
 
 def offline_plan(
-    ctx: Ctx, deps: Path | None, user_cache: Path, cargo_lock: Path | None, pubspec_lock: Path | None, cargo_out: Path | None = None
+    ctx: Ctx, deps: Path | None, user_cache: Path, cargo_lock: Path | None, pubspec_lock: Path | None, cargo_out: Path | None = None,
+    vendor: Vendor | None = None,
 ) -> dict:
     """{cache, reason, cargo_home}: the seeded pub cache and cargo home, or why a build must go online.
 
@@ -2362,12 +2633,12 @@ def offline_plan(
             if absent_git:
                 plan["reason"] = f"the deps branch lacks git checkouts: {', '.join(absent_git[:5])}"
                 return plan
-    if cargo_lock is not None and cargo_lock.is_file():
-        lock = read_lock(cargo_lock)
+    vendor = vendor or vendors_of(ctx)[0]
+    if vendor.item or (cargo_lock is not None and cargo_lock.is_file()):
         try:
-            info = use_crates(ctx, deps, lock, cargo_lock, cargo_out)
+            info = use_vendor(ctx, deps, vendor, cargo_lock, cargo_out)
         except Problem as problem:
-            plan["reason"] = f"the deps branch's crates/ does not cover {cargo_lock.name}: {problem}"
+            plan["reason"] = f"the deps branch's {vendor.folder}/ does not cover {cargo_lock.name if cargo_lock else vendor.lock or vendor.item}: {problem}"
             return plan
         plan["cargo_home"] = info["cargo_home"]
     if pubspec_lock is not None and pubspec_lock.is_file():
@@ -2392,7 +2663,9 @@ def offline_plan(
 
 
 def offline_command(ctx: Ctx, args: argparse.Namespace) -> int:
-    cargo_lock = args.cargo_lock.resolve() if args.cargo_lock else ctx.root / ctx.cfg.deps.cargo_lock
+    vendor = chosen_vendors(ctx, args, False)[0]
+    override = lock_overrides(ctx, args).get(vendor.folder)
+    cargo_lock = override or (ctx.root / vendor.lock if vendor.lock else None)
     ctx.pubspec_lock = args.pubspec_lock
     try:
         deps = find_deps(ctx, args.deps)
@@ -2401,7 +2674,7 @@ def offline_command(ctx: Ctx, args: argparse.Namespace) -> int:
         reason = str(problem)
     chosen = args.pub_cache
     user_cache = Path(chosen) if chosen else Path(ctx.cfg.deps.pub.cache) if ctx.cfg.deps.pub.cache else default_pub_cache(os.environ)
-    plan = offline_plan(ctx, deps, user_cache, cargo_lock, pubspec_lock_of(ctx), args.out)
+    plan = offline_plan(ctx, deps, user_cache, cargo_lock, pubspec_lock_of(ctx), args.out, vendor)
     if deps is None:
         plan["reason"] = reason
     if args.json:
@@ -2420,6 +2693,7 @@ def add_offline(sub: argparse._SubParsersAction) -> None:
     plan = commands.add_parser("plan", help="seed the pub cache and write the cargo home from the deps checkout, or say why not")
     plan.add_argument("--json", action="store_true", help="print {cache, reason, cargo_home} as JSON")
     plan.add_argument("--deps", type=Path, metavar="DIR", help="the deps checkout (default: `deps path`)")
+    plan.add_argument("--vendor", metavar="FOLDER", help="the [[deps.vendor]] folder whose cargo home is written (default: the first)")
     plan.add_argument("--cargo-lock", type=Path, metavar="FILE", help="read this Cargo.lock instead of the repository's")
     plan.add_argument("--pubspec-lock", type=Path, metavar="FILE", help="read this pubspec.lock instead of [deps.pub] lock")
     plan.add_argument("--pub-cache", type=Path, metavar="DIR", help="the user's pub cache, only read (git packages recorded, not vendored, come from it)")
@@ -2773,8 +3047,7 @@ def sdk_check(ctx: Ctx, args: argparse.Namespace) -> int:
         if not HEX40.match(pin):
             found.append(f"{path.name}:{pin_line}: the deps pin is not a commit: {pin}")
         else:
-            lock_file = ctx.root / ctx.cfg.deps.cargo_lock
-            more, extra = ref_problems(ctx, read_lock(lock_file), pin)
+            more, extra = ref_problems(ctx, None, pin)
             found += [f"{ctx.cfg.deps.pin.lock}:{pin_line}: {line}" for line in more]
             notes += extra
     deps_ref = args.deps_ref or f"origin/{ctx.cfg.deps.branch}"
@@ -2853,6 +3126,17 @@ class Installer:
         self.exe = ".exe" if self.windows else ""
         self.rustup = self.cargo_home / "bin" / f"rustup{self.exe}"
         self.tool_env = {**os.environ, "RUSTUP_HOME": str(self.rustup_home), "CARGO_HOME": str(self.cargo_home)}
+        # The deps checkout an item vendor's tool is built from (`--deps`), found only when a tool has to be built.
+        self.deps_arg: Path | None = None
+        self.deps_found: tuple[Path | None, str] | None = None
+
+    def deps_checkout(self) -> tuple[Path | None, str]:
+        if self.deps_found is None:
+            try:
+                self.deps_found = (find_deps(self.ctx, self.deps_arg), "")
+            except Problem as problem:
+                self.deps_found = (None, str(problem))
+        return self.deps_found
 
     # reporting
     def report(self, what: str, state: str) -> None:
@@ -2962,9 +3246,60 @@ class Installer:
             code, out = capture_tool([str(self.rustup), "default"], self.tool_env)
             if not out.startswith(f"{numeric[0]}-{self.triple}"):
                 run_tool([str(self.rustup), "default", f"{numeric[0]}-{self.triple}"], self.tool_env)
-        for tool in [i for i in self.items if i.name.startswith("cargo-") and i.group in self.groups]:
+        self.rust_targets(numeric, targets)
+        vendored = {split_item(v.item) for v in vendors_of(self.ctx) if v.item}
+        for tool in [i for i in self.items if i.name.startswith("cargo-") and i.group in self.groups and (i.group, i.name) not in vendored]:
             self.cargo_tool(tool, numeric[0] if numeric else None)
+        self.vendored_tools(numeric[0] if numeric else None)
         self.paths.append(str(self.cargo_home / "bin"))
+
+    def rust_targets(self, toolchains: list[str], targets: list[str]) -> None:
+        """One line per `rust-target` row of each numeric toolchain: a build never adds a target."""
+        for toolchain in toolchains:
+            if not targets:
+                return
+            code, out = capture_tool([str(self.rustup), "target", "list", "--toolchain", toolchain, "--installed"], self.tool_env) if self.rustup.is_file() else (1, "")
+            have = out.split() if code == 0 else []
+            for target in targets:
+                label = f"rust-target {target} ({toolchain})"
+                if target in have:
+                    self.report(label, "ok")
+                else:
+                    self.need(label, "missing")
+
+    def vendored_tools(self, stable: str | None) -> None:
+        """Each item vendor's crate, built offline from its folder of the deps branch."""
+        for vendor in vendors_of(self.ctx):
+            if not vendor.item:
+                continue
+            group, name = split_item(vendor.item)
+            rows = self.rows(name, group)
+            if not rows:
+                continue
+            row = rows[0]
+            binary = self.cargo_home / "bin" / f"{vendor.bin or name}{self.exe}"
+            code, out = capture_tool([str(binary), "--version"], self.tool_env) if binary.is_file() else (1, "")
+            label = f"{name} {row.version}"
+            if code == 0 and out.split()[1:2] == [row.version]:
+                self.report(label, "ok")
+                continue
+            deps, why = self.deps_checkout()
+            if deps is None:
+                if self.check:
+                    self.need(label, "missing, needs a deps checkout")
+                    continue
+                raise Problem(f"{label} is built offline from {vendor.folder}/ of the deps branch and there is no deps checkout ({why}); pass --deps DIR")
+            if self.check:
+                self.need(label, f"missing, cargo would build it from {vendor.folder}/ offline")
+                continue
+            if stable is None:
+                raise Problem(f"{name} needs a stable rust row to be installed with")
+            info = use_vendor(self.ctx, deps, vendor, None, self.prefix / "vendor" / vendor.folder)
+            run_tool(
+                [str(self.rustup), "run", stable, "cargo", "--config", info["config"], "install", "--offline", "--locked", name, "--version", row.version],
+                self.tool_env,
+            )
+            self.report(label, "installed")
 
     def cargo_tool(self, tool: Item, stable: str | None) -> None:
         binary = self.cargo_home / "bin" / f"{tool.name}{self.exe}"
@@ -3027,6 +3362,7 @@ class Installer:
             if (
                 item.group not in self.groups or item.group == "system" or not item.url.startswith("https://") or item.url.endswith(".git")
                 or item.sha256 == "-" or item.name in ("rustup-init", "llvm") or item.name.startswith("cargo-")
+                or (item.group, item.name) in {split_item(v.item) for v in vendors_of(self.ctx) if v.item}
             ):
                 continue
             directory = self.prefix / item.name / item.version
@@ -3234,6 +3570,7 @@ def sdk_install(ctx: Ctx, args: argparse.Namespace) -> int:
         prefix = Path(os.environ["BUILD_SDK_HOME"]) if os.environ.get("BUILD_SDK_HOME") else Path.home() / f".{ctx.root.name}-sdk"
     prefix = prefix.resolve() if prefix.is_absolute() else (Path.cwd() / prefix).resolve()
     install = Installer(ctx, items, plat, prefix, groups + ["system"], args.check, native)
+    install.deps_arg = getattr(args, "deps", None)
     if not args.check:
         (prefix / "dl").mkdir(parents=True, exist_ok=True)
     install.report("prefix", str(prefix) + (f" (SDK_HOME, {native['SDK_HOME'][1]})" if "SDK_HOME" in native and not args.prefix else ""))
@@ -3265,6 +3602,7 @@ def add_sdk(sub: argparse._SubParsersAction) -> None:
     install.add_argument("--groups", metavar="A,B", help="the groups to install (default: [sdk] install)")
     install.add_argument("--prefix", metavar="DIR", help="where (default: SDK_HOME of `help env`, else $BUILD_SDK_HOME, else ~/.REPO-sdk)")
     install.add_argument("--check", action="store_true", help="install nothing: report what is missing and exit 1 if anything is")
+    install.add_argument("--deps", type=Path, metavar="DIR", help="the deps checkout a [[deps.vendor]] item's tool is built from (default: `deps path`)")
     install.add_argument("--print-system", action="store_true", help="print the system packages to install, and nothing else")
     install.add_argument("--platform", metavar="OS-ARCH", help="act as this platform (default: this machine, or $BUILD_SDK_PLATFORM)")
     install.add_argument("--env", action="append", metavar="KEY=VALUE", help="set a native key of `help env` (SDK_HOME, VSINSTALLDIR, LLVM_DIR, ...); wins over the environment and the .env files")
@@ -3445,8 +3783,8 @@ def release_build(ctx: Ctx, args: argparse.Namespace) -> int:
         if key in native and key != "SDK_HOME":
             print(f"native: {key}={native[key][0]} ({native[key][1]})")
     if args.offline:
-        lock_path = args.cargo_lock.resolve() if args.cargo_lock else ctx.root / ctx.cfg.deps.cargo_lock
-        info = use_crates(ctx, find_deps(ctx, args.deps), read_lock(lock_path), lock_path, args.out)
+        vendor = vendors_of(ctx)[0]
+        info = use_vendor(ctx, find_deps(ctx, args.deps), vendor, args.cargo_lock.resolve() if args.cargo_lock else None, args.out)
         config = Path(info["config"])
         env["CARGO_NET_OFFLINE"] = "true"
     fill = lambda text: text.replace("{triple_}", target.triple.replace("-", "_")).replace("{triple}", target.triple)  # noqa: E731
@@ -3903,10 +4241,9 @@ def container_deps(ctx: Ctx, values: dict[str, tuple[str, str]], items: list[Ite
     read file by file against Cargo.lock; the lock's own commit is read by metadata, as `sdk check` covers it.
     """
     cfg = ctx.cfg.container
-    lock = read_lock(ctx.root / ctx.cfg.deps.cargo_lock)
     if "DEPS_DIR" in values:
         deps = Path(values["DEPS_DIR"][0]).resolve()
-        found, extra = dir_problems(ctx, deps, lock, True)
+        found, extra = dir_problems(ctx, deps, None, True)
         notes += extra
         if found:
             raise Problem("\n".join(f"DEPS_DIR ({values['DEPS_DIR'][1]}): {line}" for line in found))
@@ -3921,7 +4258,7 @@ def container_deps(ctx: Ctx, values: dict[str, tuple[str, str]], items: list[Ite
     deps = ctx.root / cfg.work_dir / f"deps-{key}"
     if not fetch:
         if not own and HEX40.match(ref) and has_commit(ctx.root, ref):
-            found, extra = ref_problems(ctx, lock, ref)
+            found, extra = ref_problems(ctx, None, ref)
             notes += extra
             if found:
                 raise Problem("\n".join(f"DEPS_REF: {line}" for line in found))
@@ -3939,7 +4276,7 @@ def container_deps(ctx: Ctx, values: dict[str, tuple[str, str]], items: list[Ite
     commit = head_of(deps)
     if HEX40.match(ref) and commit != ref:
         raise Problem(f"{hide_credentials(url)}: fetching {ref} gave {commit}")
-    found, extra = dir_problems(ctx, deps, lock, not own)
+    found, extra = dir_problems(ctx, deps, None, not own)
     notes += extra
     if found:
         raise Problem("\n".join(f"deps at {commit[:12]}: {line}" for line in found))

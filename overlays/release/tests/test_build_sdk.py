@@ -704,3 +704,47 @@ def test_the_default_prefix_is_named_for_the_repository_and_the_environment_wins
     monkeypatch.setattr(build.Path, "home", staticmethod(lambda: tmp_path / "home"))
     assert build.main(["--root", str(root), "sdk", "install", "--platform", "linux-x64", "--check"]) == 1
     assert str(tmp_path / "home" / ".repo-sdk") in capsys.readouterr().out
+
+
+# --- a vendored tool installed offline, and the rust-target rows --------------------------------------------------------
+
+TOOL_CFG = '[sdk]\ninstall = ["core"]\n[[deps.vendor]]\nfolder = "crates-tool"\nitem = "core tool"\nbin = "tool-bin"\n'
+
+
+def tool_rows() -> list[str]:
+    return good_rows() + ["core tool 1.0.0 any " + "a" * 64 + " -"]
+
+
+def test_check_names_a_vendored_tool_that_needs_a_deps_checkout_and_a_missing_target(build, tmp_path, machine, capsys):
+    root = sdk_repo(build, tmp_path, tool_rows(), TOOL_CFG)
+    assert install(build, root, tmp_path / "sdk", "--check") == 1
+    out = capsys.readouterr().out
+    assert "tool 1.0.0" in out and "missing, needs a deps checkout" in out
+    assert "rust-target wasm32-unknown-unknown (1.99.1)" in out and "missing" in out
+    assert machine.commands == []
+    # The first install has no deps checkout to build the tool from, so it says so instead of reaching a registry.
+    assert install(build, root, tmp_path / "sdk") == 1
+    err = capsys.readouterr().err
+    assert "tool 1.0.0 is built offline from crates-tool/ of the deps branch" in err and "pass --deps DIR" in err
+
+
+def test_a_vendored_tool_is_built_offline_from_its_folder_and_the_target_is_reported(build, tmp_path, machine, capsys):
+    from test_build_deps import vendored
+
+    root = sdk_repo(build, tmp_path, tool_rows(), TOOL_CFG)
+    lock = (
+        'version = 4\n[[package]]\nname = "tool"\nversion = "1.0.0"\n[[package]]\nname = "dep"\nversion = "1.2.3"\n'
+        'source = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "' + "b" * 64 + '"\n'
+    )
+    deps = tmp_path / "deps"
+    vendored(build, deps / "crates-tool", "tool-1.0.0", "a" * 64, extra={"Cargo.lock": lock.encode()})
+    vendored(build, deps / "crates-tool", "dep-1.2.3", "b" * 64)
+    assert install(build, root, tmp_path / "sdk", "--deps", str(deps)) == 0
+    out = capsys.readouterr().out
+    assert "rust-target wasm32-unknown-unknown (1.99.1)" in out and "tool 1.0.0" in out and "installed" in out
+    built = next(c for c in machine.commands if "install" in c and "--offline" in c)
+    assert built[1:4] == ["run", "1.99.1", "cargo"] and built[4] == "--config"
+    assert built[6:] == ["install", "--offline", "--locked", "tool", "--version", "1.0.0"]
+    config = Path(built[5]).read_text()
+    assert (deps / "crates-tool").resolve().as_posix() in config and "offline = true" in config
+    assert str(tmp_path / "sdk") in built[5], "the cargo home is written in the prefix, outside the repository"

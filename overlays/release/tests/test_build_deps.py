@@ -1167,3 +1167,183 @@ def test_refresh_without_a_pin_says_current_when_nothing_changed(build, registry
     assert build.main(["--root", str(root), "deps", "refresh"]) == 0
     assert "current: deps " in capsys.readouterr().out
     assert len(fetched) == 1
+
+
+# --- several vendor folders, manifest format 2, an item vendor -----------------------------------------------------
+
+
+def vendor_tables(*tables: tuple[str, str, str]) -> str:
+    """`[[deps.vendor]]` tables from (folder, key, value)."""
+    return "".join(f'[[deps.vendor]]\nfolder = "{folder}"\n{key} = "{value}"\n' for folder, key, value in tables)
+
+
+def second_revision(repo: Path) -> str:
+    (repo / "member" / "src" / "lib.rs").write_text("pub fn g() {}\n", encoding="utf-8")
+    return commit_all(repo, "second")
+
+
+def test_two_vendor_folders_hold_two_revisions_of_one_package(build, upstream, tmp_path, capsys):
+    repo, first = upstream
+    second = second_revision(repo)
+    root = init_repo(tmp_path / "main")
+    git_lock(build, root, repo, first)
+    (root / "app").mkdir()
+    git_lock(build, root / "app", repo, second)
+    ctx_for(build, root, vendor_tables(("crates", "lock", "Cargo.lock"), ("crates-app", "lock", "app/Cargo.lock")))
+    deps = tmp_path / "deps"
+    assert build.main(["--root", str(root), "deps", "sync", "--deps", str(deps)]) == 0
+    heads = [(deps / f / "member-0.3.0" / "Cargo.toml").read_text().split("\n")[0] for f in ("crates", "crates-app")]
+    assert f"at {first}," in heads[0] and f"at {second}," in heads[1]
+    capsys.readouterr()
+    assert build.main(["--root", str(root), "deps", "check", "--deps", str(deps)]) == 0
+    out = capsys.readouterr().out
+    assert "ok: crates 0 crates, 1 git sources cover Cargo.lock" in out and "ok: crates-app 0 crates, 1 git sources cover app/Cargo.lock" in out
+    manifest = json.loads((deps / "manifest.json").read_text())
+    assert manifest["format"] == 2 and "crates" not in manifest and "cargoLockSha256" not in manifest
+    assert set(manifest["vendors"]) == {"crates", "crates-app"}
+    assert manifest["vendors"]["crates-app"] == {
+        "lock": "app/Cargo.lock", "lockSha256": build.sha256((root / "app" / "Cargo.lock").read_bytes()), "crates": 0, "gitSources": 1,
+    }
+    shutil.rmtree(deps / "crates-app" / "member-0.3.0")
+    assert build.main(["--root", str(root), "deps", "check", "--deps", str(deps)]) == 1
+    assert "crates-app/member-0.3.0: missing, Cargo.lock names it" in capsys.readouterr().err
+    assert build.main(["--root", str(root), "deps", "check", "--vendor", "crates", "--deps", str(deps)]) == 0
+
+
+def test_vendor_picks_one_folder_for_sync_check_use_and_offline_plan(build, registry, tmp_path, capsys):
+    root, _, fetched = registry
+    (root / "other").mkdir()
+    shutil.copyfile(root / "Cargo.lock", root / "other" / "Cargo.lock")
+    ctx_for(build, root, vendor_tables(("crates", "lock", "Cargo.lock"), ("crates-other", "lock", "other/Cargo.lock")))
+    deps = tmp_path / "deps"
+    base = ["--root", str(root), "deps"]
+    assert build.main([*base, "sync", "--vendor", "crates-other", "--deps", str(deps)]) == 0
+    assert (deps / "crates-other" / "dep-1.2.3").is_dir() and not (deps / "crates").exists()
+    assert set(json.loads((deps / "manifest.json").read_text())["vendors"]) == {"crates-other"}
+    assert build.main([*base, "check", "--vendor", "crates-other", "--deps", str(deps)]) == 0
+    assert build.main([*base, "check", "--deps", str(deps)]) == 1, "the primary folder is not there"
+    assert build.main([*base, "sync", "--deps", str(deps)]) == 0
+    assert set(json.loads((deps / "manifest.json").read_text())["vendors"]) == {"crates", "crates-other"}
+    capsys.readouterr()
+    assert build.main([*base, "use", "--vendor", "crates-other", "--json", "--out", str(tmp_path / "o"), "--deps", str(deps)]) == 0
+    config = Path(json.loads(capsys.readouterr().out)["config"]).read_text()
+    assert (deps / "crates-other").resolve().as_posix() in config
+    assert build.main([*base, "use", "--json", "--out", str(tmp_path / "p"), "--deps", str(deps)]) == 0
+    assert (deps / "crates").resolve().as_posix() in Path(json.loads(capsys.readouterr().out)["config"]).read_text()
+    assert build.main(["--root", str(root), "offline", "plan", "--json", "--vendor", "crates-other", "--deps", str(deps), "--out", str(tmp_path / "q")]) == 0
+    assert json.loads(capsys.readouterr().out)["cargo_home"]
+    with pytest.raises(SystemExit) as stop:
+        build.main([*base, "check", "--vendor", "nope", "--deps", str(deps)])
+    assert stop.value.code == 2 and "the folders are crates, crates-other" in capsys.readouterr().err
+
+
+def test_a_vendor_names_exactly_one_of_lock_and_item_and_a_folder_once(build, tmp_path):
+    for text, message in (
+        ('[[deps.vendor]]\nfolder = "a"\n', "exactly one of lock and item"),
+        ('[[deps.vendor]]\nfolder = "a"\nlock = "x"\nitem = "app y"\n', "exactly one of lock and item"),
+        (vendor_tables(("a", "lock", "x"), ("a", "lock", "y")), "listed twice"),
+        (vendor_tables(("a/b", "lock", "x")), "not one path segment"),
+    ):
+        with pytest.raises(build.Problem, match=message):
+            build.vendors_of(ctx_for(build, tmp_path / "r", text))
+
+
+def tool_registry(build, monkeypatch):
+    """A crates.io that serves `tool` (whose own Cargo.lock names `dep`) and `dep`."""
+    dep = crate_archive("dep-1.2.3", {"Cargo.toml": b'[package]\nname = "dep"\n', "src/lib.rs": b""})
+    lock = (
+        'version = 4\n[[package]]\nname = "tool"\nversion = "1.0.0"\n[[package]]\nname = "dep"\nversion = "1.2.3"\n'
+        f'source = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "{build.sha256(dep)}"\n'
+    )
+    tool = crate_archive("tool-1.0.0", {"Cargo.toml": b'[package]\nname = "tool"\n', "src/main.rs": b"", "Cargo.lock": lock.encode()})
+    served = {"dep-1.2.3.crate": dep, "tool-1.0.0.crate": tool}
+    monkeypatch.setattr(build, "fetch", lambda url: served[url.rsplit("/", 1)[1]])
+    return build.sha256(tool)
+
+
+def item_root(build, tmp_path, checksum: str):
+    root = init_repo(tmp_path / "main")
+    ctx_for(build, root, '[[deps.vendor]]\nfolder = "crates-tool"\nitem = "app tool"\nbin = "tool-bin"\n')
+    (root / "tools" / "sdk.lock").write_text(f"app tool 1.0.0 any {checksum} -\n", encoding="utf-8")
+    return root
+
+
+def test_an_item_vendor_is_the_crate_and_the_packages_of_its_own_lock(build, tmp_path, monkeypatch, capsys):
+    checksum = tool_registry(build, monkeypatch)
+    root = item_root(build, tmp_path, checksum)
+    deps = tmp_path / "deps"
+    assert build.main(["--root", str(root), "deps", "sync", "--deps", str(deps)]) == 0
+    assert sorted(p.name for p in (deps / "crates-tool").iterdir()) == ["dep-1.2.3", "tool-1.0.0"]
+    assert (deps / "crates-tool" / "tool-1.0.0" / "Cargo.lock").is_file()
+    entry = json.loads((deps / "manifest.json").read_text())["vendors"]["crates-tool"]
+    assert entry["item"] == "app tool" and entry["crates"] == 2 and entry["gitSources"] == 0
+    capsys.readouterr()
+    assert build.main(["--root", str(root), "deps", "check", "--deps", str(deps)]) == 0
+    assert "ok: crates-tool 2 crates, 0 git sources cover the app tool crate's lock" in capsys.readouterr().out
+    (deps / "crates-tool" / "dep-1.2.3" / "Cargo.toml").write_bytes(b"[package] # edited\n")
+    assert build.main(["--root", str(root), "deps", "check", "--deps", str(deps)]) == 1
+    assert "crates-tool/dep-1.2.3/Cargo.toml: SHA-256" in capsys.readouterr().err
+    assert build.main(["--root", str(root), "deps", "sync", "--deps", str(deps)]) == 0
+    assert build.main(["--root", str(root), "deps", "check", "--deps", str(deps)]) == 0
+    with pytest.raises(SystemExit):
+        build.main(["--root", str(root), "deps", "check", "--cargo-lock", str(root / "x"), "--deps", str(deps)])
+    assert "cannot replace crates-tool" in capsys.readouterr().err
+
+
+def test_sync_refuses_an_item_row_without_a_checksum_and_check_only_notes_it(build, tmp_path, monkeypatch, capsys):
+    checksum = tool_registry(build, monkeypatch)
+    root = item_root(build, tmp_path, "-")
+    deps = tmp_path / "deps"
+    assert build.main(["--root", str(root), "deps", "sync", "--deps", str(deps)]) == 1
+    err = capsys.readouterr().err
+    assert "the `app tool` row has no SHA-256" in err and "https://index.crates.io/" in err
+    (root / "tools" / "sdk.lock").write_text(f"app tool 1.0.0 any {checksum} -\n", encoding="utf-8")
+    assert build.main(["--root", str(root), "deps", "sync", "--deps", str(deps)]) == 0
+    (root / "tools" / "sdk.lock").write_text("app tool 1.0.0 any - -\n", encoding="utf-8")
+    capsys.readouterr()
+    assert build.main(["--root", str(root), "deps", "check", "--deps", str(deps)]) == 0
+    assert "the `app tool` row has no SHA-256, so crates-tool is not held to the crate's checksum" in capsys.readouterr().out
+
+
+def test_format_1_is_written_as_it_always_was_when_nothing_is_configured(build, registry, tmp_path):
+    root, checksum, _ = registry
+    ctx_for(build, root)
+    commit = commit_all(root)
+    deps = tmp_path / "deps"
+    assert build.main(["--root", str(root), "deps", "sync", "--deps", str(deps)]) == 0
+    expected = (
+        '{\n  "cargoLockSha256": "%s",\n  "crates": 1,\n  "format": 1,\n  "gitSources": 0,\n  "sourceCommit": "%s"\n}\n'
+        % (build.sha256((root / "Cargo.lock").read_bytes()), commit)
+    )
+    assert (deps / "manifest.json").read_bytes() == expected.encode()
+
+
+def test_the_manifest_keeps_another_writers_keys_and_drops_a_section_turned_off(build, registry, tmp_path):
+    root, _, _ = registry
+    commit_all(root)
+    for cfg, format_ in (("", 1), (vendor_tables(("crates", "lock", "Cargo.lock")), 2)):
+        ctx_for(build, root, cfg)
+        deps = tmp_path / f"deps{format_}"
+        deps.mkdir()
+        (deps / "manifest.json").write_text(json.dumps({"format": 1, "officeJs": {"commit": "x"}, "cdn": {"files": []}, "trees": {}}), encoding="utf-8")
+        assert build.main(["--root", str(root), "deps", "sync", "--deps", str(deps)]) == 0
+        manifest = json.loads((deps / "manifest.json").read_text())
+        assert manifest["format"] == format_ and manifest["officeJs"] == {"commit": "x"}
+        assert "cdn" not in manifest and "trees" not in manifest, "an owned section that is off disappears"
+
+
+def test_a_format_2_manifest_without_vendors_gives_notes_and_an_unknown_format_is_a_problem(build, registry, tmp_path, capsys):
+    root, _, _ = registry
+    ctx_for(build, root, vendor_tables(("crates", "lock", "Cargo.lock")))
+    deps = tmp_path / "deps"
+    assert build.main(["--root", str(root), "deps", "sync", "--deps", str(deps)]) == 0
+    (deps / "manifest.json").write_text(json.dumps({"format": 2, "officeJs": {}}), encoding="utf-8")
+    capsys.readouterr()
+    assert build.main(["--root", str(root), "deps", "check", "--deps", str(deps)]) == 0
+    assert "note: manifest.json does not record crates" in capsys.readouterr().out
+    (deps / "manifest.json").write_text(json.dumps({"format": 2, "vendors": {"crates": {"crates": 9, "gitSources": 0}}}), encoding="utf-8")
+    assert build.main(["--root", str(root), "deps", "check", "--deps", str(deps)]) == 1
+    assert "manifest.json: crates: says 9 crates" in capsys.readouterr().err
+    (deps / "manifest.json").write_text(json.dumps({"format": 3}), encoding="utf-8")
+    assert build.main(["--root", str(root), "deps", "check", "--deps", str(deps)]) == 1
+    assert "format 3, this tool reads 1 and 2" in capsys.readouterr().err
