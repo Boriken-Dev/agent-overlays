@@ -83,7 +83,9 @@ repo-guard ci     [-C DIR] [--ref REF] [--timeout S] [--find-timeout S] [--every
 - `push` checks every commit above `REMOTE/MAIN` (author and committer are the identity, no forbidden trailer), that HEAD
   fast-forwards `REMOTE/MAIN`, the engineering overlay's `leak-check` script, the repository's `tools/build.py scan --all-refs` and each `pre_push`
   command; then pushes `HEAD:MAIN` and fast-forwards `[repo_guard] checkout` when set. When `tools/build.cfg` has a `[deps]`
-  table and a lock file it names changed, `deps` follows. With nothing to push it still runs the checks.
+  table and a file it names changed, `deps` follows. The files are each `[[deps.vendor]]` `lock` (`[deps] cargo_lock` when
+  no vendor is listed), the `[sdk] lock` (default `tools/sdk.lock`) when a vendor is an `item`, `[deps.pub] lock`, each
+  `[[deps.tree]]` `pin` and `[deps.cdn] index`. With nothing to push it still runs the checks.
 - `deps` runs `tools/build.py deps refresh`, scans the deps checkout, pushes the deps branch and then main, and appends a line to
   `[repo_guard] log`.
 - `ci` tags `REF` (default main) as `ci-TOPIC-<UTC yyyymmddHHMMSS>`, pushes it, waits for the run through the release host,
