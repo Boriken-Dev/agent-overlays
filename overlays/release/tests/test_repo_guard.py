@@ -371,3 +371,50 @@ def test_ci_gives_up_after_the_find_timeout(world, capsys):
     assert run_ci(work, host, lambda *a: ("", [], ""), extra=["--find-timeout", "10", "--every", "5"]) == 1
     assert len(host.refs) == 3
     assert tags(bare) == []
+
+
+def test_every_deps_input_is_followed(world, tmp_path):
+    work, _ = world
+    (work / "tools").mkdir(exist_ok=True)
+    cfg = work / "tools" / "build.cfg"
+    cfg.write_text(
+        '[deps]\ncargo_lock = "unused/Cargo.lock"\n'
+        '[[deps.vendor]]\nfolder = "crates"\nlock = "Cargo.lock"\n'
+        '[[deps.vendor]]\nfolder = "crates-web"\nlock = "app/web/Cargo.lock"\n'
+        '[[deps.vendor]]\nfolder = "crates-tool"\nitem = "app tool"\n'
+        '[[deps.tree]]\nname = "lib"\nrepo = "o/lib"\npin = "tools/lib.json"\npath = "cdn/lib"\n'
+        '[deps.pub]\nlock = "app/pubspec.lock"\n[deps.cdn]\nindex = "tools/cdn_files.json"\n',
+        encoding="utf-8",
+    )
+    locks = lambda: guard.Guard(work).deps_locks()  # noqa: E731
+    assert locks() == ["Cargo.lock", "app/web/Cargo.lock", "tools/sdk.lock", "app/pubspec.lock", "tools/lib.json", "tools/cdn_files.json"]
+    cfg.write_text(cfg.read_text(encoding="utf-8") + '[sdk]\nlock = "tools/pins.lock"\n', encoding="utf-8")
+    assert "tools/pins.lock" in locks() and "tools/sdk.lock" not in locks()
+
+
+def test_the_sdk_lock_is_followed_only_for_a_vendored_crate_and_cargo_lock_without_vendors(world):
+    work, _ = world
+    (work / "tools").mkdir(exist_ok=True)
+    cfg = work / "tools" / "build.cfg"
+    cfg.write_text('[deps]\n[[deps.vendor]]\nfolder = "crates"\nlock = "Cargo.lock"\n', encoding="utf-8")
+    assert guard.Guard(work).deps_locks() == ["Cargo.lock"]
+    cfg.write_text('[deps]\n', encoding="utf-8")
+    assert guard.Guard(work).deps_locks() == ["Cargo.lock"]
+    cfg.write_text('[sdk]\nlock = "x"\n', encoding="utf-8")
+    assert guard.Guard(work).deps_locks() == [], "no [deps] table, nothing to follow"
+
+
+def test_a_changed_nested_lock_refreshes_deps(world, tmp_path, capsys):
+    work, bare, checkout = deps_world(world, tmp_path)
+    (work / "tools" / "build.cfg").write_text(
+        '[deps]\n[[deps.vendor]]\nfolder = "crates"\nlock = "Cargo.lock"\n[[deps.vendor]]\nfolder = "crates-web"\nlock = "web/Cargo.lock"\n',
+        encoding="utf-8",
+    )
+    (work / "web").mkdir()
+    (work / "web" / "Cargo.lock").write_text("w1\n", encoding="utf-8")
+    git(work, "add", "-A", "-f")
+    git(work, "-c", f"user.name={NAME}", "-c", f"user.email={EMAIL}", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "chore: web")
+    git(work, "push", "-q", "origin", "main")
+    commit_file(work, "web/Cargo.lock", "chore: nested lock")
+    assert main("push", "-C", work) == 0
+    assert "pushed deps" in capsys.readouterr().out

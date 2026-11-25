@@ -143,15 +143,32 @@ class Guard:
             raise Refused(f"{path}: cannot be read: {error}") from None
 
     def deps_locks(self) -> list[str]:
-        """The lock files the deps branch must follow; empty when the repository has no `[deps]` table."""
-        deps = self.build_cfg().get("deps")
+        """The files the deps branch must follow; empty when the repository has no `[deps]` table.
+
+        Each vendor's Cargo.lock (`cargo_lock` when no vendor is listed), the SDK lock when a vendor is a crate named by one of
+        its rows, the pubspec.lock, each tree's pin file and the CDN index.
+        """
+        cfg = self.build_cfg()
+        deps = cfg.get("deps")
         if not isinstance(deps, dict):
             return []
-        locks = [deps.get("cargo_lock", "Cargo.lock")]
+        vendors = [v for v in deps.get("vendor", []) if isinstance(v, dict)] if isinstance(deps.get("vendor"), list) else []
+        if vendors:
+            locks = [v.get("lock") for v in vendors]
+            if any(v.get("item") for v in vendors):
+                sdk = cfg.get("sdk")
+                locks.append(sdk.get("lock", "tools/sdk.lock") if isinstance(sdk, dict) else "tools/sdk.lock")
+        else:
+            locks = [deps.get("cargo_lock", "Cargo.lock")]
         pub = deps.get("pub")
-        if isinstance(pub, dict) and pub.get("lock"):
-            locks.append(pub["lock"])
-        return [lock for lock in locks if lock]
+        if isinstance(pub, dict):
+            locks.append(pub.get("lock"))
+        if isinstance(deps.get("tree"), list):
+            locks += [t.get("pin") for t in deps["tree"] if isinstance(t, dict)]
+        cdn = deps.get("cdn")
+        if isinstance(cdn, dict):
+            locks.append(cdn.get("index"))
+        return list(dict.fromkeys(lock for lock in locks if lock))
 
     def deps_branch(self) -> str:
         deps = self.build_cfg().get("deps")
