@@ -2320,6 +2320,18 @@ SCHEMA["flutter"] = Key(
         "branch": Key("str", "main", "The branch the SDK's clone is checked out on (Flutter names its channel from it)."),
     },
 )
+SCHEMA["flutter"].keys["fonts"] = Key(
+    "table",
+    None,
+    "The fallback fonts the Flutter web engine asks for: the [deps.cdn] index entries of one host and path prefix (off when `host` is empty).",
+    {
+        "host": Key("str", "", "The CDN host of the fonts, for example fonts.gstatic.com."),
+        "prefix": Key("str", "/s/", "The path prefix of the fonts in the index; the font's own path is the rest."),
+        "engine_data": Key("str", "bin/cache/flutter_web_sdk/lib/_engine/engine/font_fallback_data.dart", "The engine's font manifest, relative to the Flutter checkout."),
+        "pattern": Key("str", "NotoFont\\(\\s*'[^']+',\\s*'([^']+)'", "A regular expression (multi-line) over that file with one group: a font's path."),
+        "install_dir": Key("str", "assets/fonts/fallback", "Where `fonts-install` puts the fonts below the build output."),
+    },
+)
 SCHEMA["offline"] = Key(
     "table",
     None,
@@ -3166,6 +3178,74 @@ def flutter_precache_check(ctx: Ctx, args: argparse.Namespace) -> int:
     return 0
 
 
+def font_index(ctx: Ctx) -> dict[str, str]:
+    """Font path (below the prefix) to SHA-256: the `[deps.cdn]` index entries of `[flutter.fonts]`'s host and prefix."""
+    cfg = ctx.cfg.flutter.fonts
+    if not cfg.host:
+        raise Usage("[flutter.fonts] host is not set")
+    if not ctx.cfg.deps.cdn.index:
+        raise Problem("[flutter.fonts] reads the [deps.cdn] index, and `index` is not set")
+    return {e["path"][len(cfg.prefix) :]: e["sha256"] for e in cdn_files(ctx) if e["host"] == cfg.host and e["path"].startswith(cfg.prefix)}
+
+
+def flutter_fonts_check(ctx: Ctx, args: argparse.Namespace) -> int:
+    """The index names exactly the fonts this SDK's web engine asks for."""
+    cfg = ctx.cfg.flutter.fonts
+    listed = font_index(ctx)
+    root = args.flutter_root or (Path(os.environ["FLUTTER_ROOT"]) if os.environ.get("FLUTTER_ROOT") else None)
+    if root is None:
+        raise Usage("name the Flutter checkout with --flutter-root or $FLUTTER_ROOT")
+    data = root / cfg.engine_data
+    if not data.is_file():
+        raise Problem(f"{data} is missing: run flutter precache --web there")
+    try:
+        pattern = re.compile(cfg.pattern, re.MULTILINE)
+    except re.error as error:
+        raise Problem(f"flutter.fonts.pattern: {error}") from error
+    if pattern.groups != 1:
+        raise Problem("flutter.fonts.pattern needs exactly one group: the font's path")
+    asked = set(pattern.findall(data.read_text(encoding="utf-8")))
+    if not asked:
+        raise Problem(f"{data} lists no fonts for flutter.fonts.pattern")
+    if asked != set(listed):
+        unlisted, unrequested = sorted(asked - set(listed)), sorted(set(listed) - asked)
+        raise Problem(
+            f"the {ctx.cfg.deps.cdn.index} fonts of {cfg.host} are not what this Flutter's engine asks for: "
+            f"{len(unlisted)} unlisted, {len(unrequested)} not requested"
+            + (f"; first unlisted {unlisted[0]}" if unlisted else "")
+            + (f"; first not requested {unrequested[0]}" if unrequested else "")
+        )
+    print(f"ok: {len(asked)} fonts, the engine's and the index's")
+    return 0
+
+
+def flutter_fonts_install(ctx: Ctx, args: argparse.Namespace) -> int:
+    """Copies each font from the deps checkout into the build output, verified against the index; never fetches."""
+    cfg = ctx.cfg.flutter.fonts
+    listed = font_index(ctx)
+    deps = find_deps(ctx, args.deps)
+    problems_found: list[str] = []
+    done = 0
+    for name, digest in sorted(listed.items()):
+        source = deps / "cdn" / cfg.host / (cfg.prefix + name).lstrip("/")
+        if not source.is_file():
+            problems_found.append(f"{name}: not on the deps branch")
+            continue
+        body = source.read_bytes()
+        if sha256(body) != digest:
+            problems_found.append(f"{name}: SHA-256 is not the index's")
+            continue
+        target = args.dist / cfg.install_dir / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(body)
+        done += 1
+    if problems_found:
+        more = f" (and {len(problems_found) - 3} more)" if len(problems_found) > 3 else ""
+        raise Problem("the fallback fonts are not all on the deps branch: " + "; ".join(problems_found[:3]) + more + "; `deps sync` fills them")
+    print(f"installed {done} fonts into {args.dist / cfg.install_dir}")
+    return 0
+
+
 def add_flutter(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("flutter", help="plugin junctions on Windows and the pinned Flutter checkout")
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
@@ -3176,6 +3256,13 @@ def add_flutter(sub: argparse._SubParsersAction) -> None:
     check.add_argument("--flutter-root", type=Path, metavar="DIR", help="the Flutter checkout (default: $FLUTTER_ROOT)")
     check.add_argument("--platform", metavar="LIST", help="also require these platforms' files (web, windows, linux, macos; comma separated) to be precached")
     check.set_defaults(run=flutter_precache_check)
+    fonts = commands.add_parser("fonts-check", help="hold the CDN index's fonts to the ones this Flutter's web engine asks for ([flutter.fonts])")
+    fonts.add_argument("--flutter-root", type=Path, metavar="DIR", help="the Flutter checkout (default: $FLUTTER_ROOT)")
+    fonts.set_defaults(run=flutter_fonts_check)
+    install_fonts = commands.add_parser("fonts-install", help="copy the fallback fonts from the deps checkout into a web build's output")
+    install_fonts.add_argument("dist", type=Path, metavar="DIST", help="the build output (for example build/web)")
+    install_fonts.add_argument("--deps", type=Path, metavar="DIR", help="the deps checkout (default: `deps path`)")
+    install_fonts.set_defaults(run=flutter_fonts_install)
 
 
 SECTIONS.extend([add_offline, add_flutter])

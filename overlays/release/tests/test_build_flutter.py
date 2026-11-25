@@ -777,3 +777,82 @@ def test_the_served_tree_answers_get_and_head_on_loopback_and_records_each_miss(
         assert misses == ["/d/nope-GET.txt", "/d/nope-HEAD.txt"]
     with pytest.raises(OSError):
         urllib.request.urlopen(f"http://127.0.0.1:{port}/d/here.txt", timeout=2)
+
+
+# --- the web engine's fallback fonts ------------------------------------------------------------------------------------
+
+FONTS = {"a/v1/a.woff2": b"font a", "b/v2/b.woff2": b"font b", "c/v3/c.woff2": b"font c"}
+FONTS_CFG = '[deps.cdn]\nindex = "tools/cdn_files.json"\n[flutter.fonts]\nhost = "fonts.test"\n'
+
+
+@pytest.fixture
+def fonts_repo(build, tmp_path):
+    root = init_repo(tmp_path / "repo")
+    entries = [{"host": "fonts.test", "path": f"/s/{n}", "sha256": build.sha256(b)} for n, b in sorted(FONTS.items())]
+    entries.append({"host": "other.test", "path": "/s/x.woff2", "sha256": "0" * 64})
+    ctx_for(build, root, FONTS_CFG)
+    (root / "tools" / "cdn_files.json").write_text(json.dumps({"files": entries}), encoding="utf-8")
+    sdk = tmp_path / "flutter"
+    data = sdk / "bin" / "cache" / "flutter_web_sdk" / "lib" / "_engine" / "engine" / "font_fallback_data.dart"
+    data.parent.mkdir(parents=True)
+    data.write_text(
+        "const fonts = [\n" + "".join(f"  NotoFont('Noto {n}', '{n}'),\n" for n in sorted(FONTS)) + "];\n", encoding="utf-8"
+    )
+    deps = tmp_path / "deps"
+    for name, body in FONTS.items():
+        target = deps / "cdn" / "fonts.test" / "s" / name
+        target.parent.mkdir(parents=True)
+        target.write_bytes(body)
+    return root, sdk, deps
+
+
+def test_fonts_check_passes_when_the_engine_asks_for_exactly_the_indexed_fonts(build, fonts_repo, capsys):
+    root, sdk, _ = fonts_repo
+    assert build.main(["--root", str(root), "flutter", "fonts-check", "--flutter-root", str(sdk)]) == 0
+    assert "ok: 3 fonts" in capsys.readouterr().out
+
+
+def test_fonts_check_names_an_unlisted_and_an_unrequested_font(build, fonts_repo, capsys):
+    root, sdk, _ = fonts_repo
+    data = sdk / "bin" / "cache" / "flutter_web_sdk" / "lib" / "_engine" / "engine" / "font_fallback_data.dart"
+    data.write_text("NotoFont('x', 'a/v1/a.woff2'), NotoFont('y', 'b/v2/b.woff2'), NotoFont('z', 'd/v4/d.woff2')", encoding="utf-8")
+    assert build.main(["--root", str(root), "flutter", "fonts-check", "--flutter-root", str(sdk)]) == 1
+    err = capsys.readouterr().err
+    assert "1 unlisted, 1 not requested; first unlisted d/v4/d.woff2; first not requested c/v3/c.woff2" in err
+    data.unlink()
+    assert build.main(["--root", str(root), "flutter", "fonts-check", "--flutter-root", str(sdk)]) == 1
+    assert "font_fallback_data.dart is missing" in capsys.readouterr().err
+
+
+def test_fonts_install_copies_from_the_deps_checkout_and_verifies_each_file(build, fonts_repo, tmp_path, capsys):
+    root, _, deps = fonts_repo
+    dist = tmp_path / "dist"
+    assert build.main(["--root", str(root), "flutter", "fonts-install", str(dist), "--deps", str(deps)]) == 0
+    for name, body in FONTS.items():
+        assert (dist / "assets" / "fonts" / "fallback" / name).read_bytes() == body
+    assert "installed 3 fonts" in capsys.readouterr().out
+    (deps / "cdn" / "fonts.test" / "s" / "a" / "v1" / "a.woff2").write_bytes(b"changed")
+    (deps / "cdn" / "fonts.test" / "s" / "b" / "v2" / "b.woff2").unlink()
+    assert build.main(["--root", str(root), "flutter", "fonts-install", str(tmp_path / "again"), "--deps", str(deps)]) == 1
+    err = capsys.readouterr().err
+    assert "a/v1/a.woff2: SHA-256 is not the index's" in err and "b/v2/b.woff2: not on the deps branch" in err
+
+
+def test_the_fonts_settings_are_the_engines_and_the_apps_facts(build, fonts_repo, tmp_path):
+    root, sdk, deps = fonts_repo
+    other = sdk / "fonts.txt"
+    other.write_text("font: a/v1/a.woff2\nfont: b/v2/b.woff2\nfont: c/v3/c.woff2\n", encoding="utf-8")
+    ctx_for(build, root, FONTS_CFG + 'engine_data = "fonts.txt"\npattern = "^font: (\\\\S+)$"\ninstall_dir = "f"\n')
+    assert build.main(["--root", str(root), "flutter", "fonts-check", "--flutter-root", str(sdk)]) == 0
+    dist = tmp_path / "dist"
+    assert build.main(["--root", str(root), "flutter", "fonts-install", str(dist), "--deps", str(deps)]) == 0
+    assert (dist / "f" / "a" / "v1" / "a.woff2").is_file()
+
+
+def test_without_a_host_both_fonts_commands_are_a_usage_error(build, fonts_repo, tmp_path, capsys):
+    root, sdk, deps = fonts_repo
+    ctx_for(build, root, "")
+    for argv in (["fonts-check", "--flutter-root", str(sdk)], ["fonts-install", str(tmp_path / "d"), "--deps", str(deps)]):
+        with pytest.raises(SystemExit) as stop:
+            build.main(["--root", str(root), "flutter", *argv])
+        assert stop.value.code == 2 and "[flutter.fonts] host is not set" in capsys.readouterr().err
