@@ -93,7 +93,20 @@ A section the configuration leaves out is off.
   verified against its hash; `hosts` limits the index to some hosts.
 - `offline plan [--json]` checks the deps checkout against `pubspec.lock` and `Cargo.lock`, seeds a pub cache below
   `target/offline-pub-cache` (git packages the branch only records come from the user's pub cache, which is only read) and
-  writes the cargo home, or prints why a build must go online.
+  writes the cargo home, or prints why a build must go online. For a git package of `git = "checkout"` it writes what pub
+  needs to take the checkout without the network: `.git/pub-packages` lists each folder of the checkout that holds a
+  `pubspec.yaml` (`.` for its root; rewritten on every run), and `git/cache/REPO-SHA1` (the SHA-1 of the package's URL) is a
+  bare repository in which the locked revision resolves, through `refs/replace/REV`, to an empty commit; an existing one
+  is kept. Without them `flutter pub get --offline` clones from the network.
+- `offline env [--json]` runs the plan and prints the variables an offline build runs under, as `KEY=VALUE` lines or a JSON
+  object (with `cache` and `cargo_home`): `PUB_CACHE`, `CARGO_HOME`, `CARGO_NET_OFFLINE=true`,
+  `FLUTTER_SUPPRESS_ANALYTICS=true`, `DART_SUPPRESS_ANALYTICS=true` and `FLUTTER_STORAGE_BASE_URL` (the process's own value
+  when set, else `[offline] storage_url`, default `http://127.0.0.1:9`, which nothing answers so a build that reaches for
+  Google's storage fails; empty: not set). `[offline.env]` adds variables after those, and an empty value removes one.
+  `offline run [plan flags] -- COMMAND ...` runs the plan, then the command in the current directory under those
+  variables, and exits with its code; when offline is not possible it prints why, runs nothing and exits 1. Both take the
+  plan's flags (`--deps`, `--vendor`, `--cargo-lock`, `--pubspec-lock`, `--pub-cache`, `--out`). A repository that wants
+  the network does not call `offline run`; there is no flag to turn it off.
 - `flutter junctions` recreates the Windows plugin links `flutter build windows` needs, as directory junctions that need no
   Developer Mode; `flutter precache-check` compares a Flutter checkout's version, engine stamp and Dart with the SDK lock rows
   named in `[flutter]`.
