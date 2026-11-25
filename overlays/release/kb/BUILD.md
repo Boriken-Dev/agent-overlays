@@ -133,6 +133,14 @@ A section the configuration leaves out is off.
   leaves the commit unchecked. `precache-check --platform web,windows,linux,macos` also requires each platform's files under
   `bin/cache`: `flutter_web_sdk`, `artifacts/engine/windows-ARCH`, `artifacts/engine/linux-ARCH` and
   `artifacts/engine/darwin-x64` (`ARCH` is `x64` or `arm64`, this machine's), one line for each that is missing.
+- `[flutter.fonts]` (off while `host` is empty) is the Flutter web engine's fallback fonts: they are the `[deps.cdn]` index
+  entries of `host` whose path starts with `prefix` (default `/s/`), the font's own path being the rest, so `deps sync`
+  mirrors them like any CDN file. `flutter fonts-check [--flutter-root DIR]` fails unless the set of paths the engine's
+  `engine_data` file names (read with `pattern`, one group, multi-line) equals the index's, naming the counts and the first
+  unlisted and first unrequested path. `flutter fonts-install DIST [--deps DIR]` copies each font from
+  `DEPS/cdn/HOST/PREFIX/PATH` to `DIST/install_dir/PATH` (default `assets/fonts/fallback`), verifying the index's SHA-256,
+  and fails naming up to three missing or changed files; it never fetches. Rewriting the index after a Flutter upgrade
+  stays the repository's. Without a `host` both commands exit 2 with `[flutter.fonts] host is not set`.
 - `sdk install` precaches the Flutter SDK from the engine's release, never from Google's storage. `[flutter] sdk_item` names
   the git row that is the SDK: its clone is checked out with `git checkout -B BRANCH COMMIT` (`branch`, default `main`, since
   Flutter names its channel from it) and its tags are fetched. `engine_release` is the directory of the engine's release,
