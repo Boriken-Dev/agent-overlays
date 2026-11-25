@@ -3,15 +3,11 @@
 Rust-specific extras/overrides on top of the generic repo standard in
 `$ENGINEERING_OVERLAY_ROOT/flows/REPO.md` — read that first. Only Rust-specific content here.
 
-This file is packaging, tooling, CI, release and the traps already paid for.
+This file is packaging, tooling, CI, release and known traps.
 **How a crate is designed, named, documented and tested is in
 `$RUST_OVERLAY_ROOT/standards/`** — start at its `README.md`, which says which
 standard applies to the work. A project's recorded exceptions to them are in its
 `.agents/AGENTS.md`.
-
-Written 2026-07-27 from the first substantial Rust project under these rules: a
-14-crate workspace with a hand-written C ABI, three plugin backends, and a forked
-protocol library. Every rule below cost something to learn.
 
 ## Packaging and Layout
 
@@ -95,13 +91,13 @@ stay useful when the surface is large.
 Cargo's packaging precedence: `include` (allow-list — overrides everything) →
 `exclude` → else honour `.gitignore` inside a git repo. So gitignore protection dies
 silently the day someone adds an `include` list or packages outside a git checkout.
-Say it twice:
+Set both:
 
 ```toml
 exclude = [".*"]
 ```
 
-Measured: drops `.agents/`, `.gitignore`, and dotfiles at every depth while
+It drops `.agents/`, `.gitignore`, and dotfiles at every depth while
 `AGENTS.md`/`README.md`/`src/` still ship. A category beats a list — `.claude`,
 `.vscode`, `.env` and the next tool's dotdir come free, and nothing a crate
 legitimately ships starts with a dot. Don't add build-output entries
@@ -114,41 +110,37 @@ Run it whenever packaging config or docs layout changes. (Every ecosystem has th
 same trap: an allow-list — npm `files`, a Python manifest — stops the ignore file
 applying; check the packaging output, not the ignore file.)
 
-### Two leak classes worth naming (rule + tool live in REPO.md / EXEC.md)
+### Two leak classes (rule + tool live in REPO.md / EXEC.md)
 
-One workspace hit **271 leaks across 13 crates** before anyone ran the leak scan
-(`$ENGINEERING_OVERLAY_ROOT/kb/LEAKS.md`), in two shapes:
+Run the leak scan (`$ENGINEERING_OVERLAY_ROOT/kb/LEAKS.md`) per crate. It finds:
 
-- **`.agents/` citations in tracked source** — they accumulate honestly: while
-  `.agents/AGENTS.md` is the *only* agent-facing file, deferring to it is correct. It
-  stops being correct the moment a shipped header exists, and nothing warns you.
-- **`Phase N` phrasing** — far easier to miss: agents narrate their own plan process
-  into doc comments. A `NOTICE.md` citing "Phase 2/3/4 additions" is the clearest tell.
+- **`.agents/` citations in tracked source**: correct only while `.agents/AGENTS.md`
+  is the sole agent-facing file; once a shipped header exists, cite that.
+- **`Phase N` phrasing**: agents narrate their plan into doc comments; a `NOTICE.md`
+  citing "Phase 2/3/4 additions" is the tell.
 
-Run it per crate. Plans and findings default to the **workspace** root when work spans
+ Plans and findings default to the **workspace** root when work spans
 crates (it usually does); a crate gets its own `.agents/plans/` only when the work is
 genuinely contained.
 
 ## FFI: the rules that cost real bugs
 
-The rules themselves are `$RUST_OVERLAY_ROOT/standards/specialized/FFI.md`; this
-section is the account of what breaking them cost.
+The rules are in `$RUST_OVERLAY_ROOT/standards/specialized/FFI.md`; this section
+holds the traps.
 
 ### `repr(C)`/`repr(transparent)` only on types that cross the ABI
 
 A Rust-only wrapper needs neither, and **adding one implies a contract that does not
 exist**. Only the `#[repr(C)]` structs genuinely handed to C need the attribute.
 
-**But do not use that as licence to cast a pointer into a reference.** The example
-originally written here was *unsound*, shipped, and caused an access violation the first
-time a converted backend ran — see the section below, which is the correction.
+**Do not cast a pointer into a reference on that basis**: see the section below.
 
 ### Casting a pointer to a wrapper reference is a level-of-indirection trap
 
 Given `struct Uri { raw: *mut sys::raw_uri }` — a wrapper **holding** a pointer:
 
 ```rust
-// WRONG. Shipped in a real project, crashed live.
+// WRONG.
 pub unsafe fn from_borrowed<'a>(raw: *const sys::raw_uri) -> &'a Uri {
     &*(raw as *const Uri)
 }
@@ -163,8 +155,7 @@ pointer *value* is fine — only its interpretation is wrong. Nothing catches it
 real handle arrives.
 
 **`#[repr(transparent)]` plus `transmute` does not fix it either.** That gets the
-reference's *address* right and still dereferences the wrong memory. Both attempts
-failed live before the cause was isolated.
+reference's *address* right and still dereferences the wrong memory.
 
 **The fix is an ordinary struct literal, not a cast:**
 
@@ -266,11 +257,9 @@ the assembly paths and the edge cases; a local version reproduces the published 
 vectors and stops there — which is the easy half.
 
 "Keeping this crate dependency-free" is a real goal, but it is **not** worth paying
-for with a security primitive. In one project the engine takes only `libloading` by design,
-and that rule was used to justify hand-writing SHA-256 for certificate pinning. Wrong
-trade twice over: a hash backing a trust decision is exactly the thing to borrow, and
-`sha2` was **already compiled in that workspace** (pulled in by `russh` through
-`ssh-key`), so the dependency cost was zero.
+for with a security primitive. A hash backing a trust decision (certificate pinning) is exactly
+the thing to borrow, even where the crate otherwise takes one dependency, and the
+crate is often already compiled in (`sha2` via `russh` and `ssh-key`).
 
 Check before assuming a dependency is new: `cargo tree -i <crate>` and the lockfile
 answer it in seconds, and a transitive dependency already in the build adds nothing.
@@ -300,7 +289,7 @@ project's own test wrapper, passes under bare `cargo test --test x`, and survive
 dozen clean repeat runs. It reads exactly like a flaky parallel-execution race, and
 serialising "fixes" it by accident often enough to be misleading.
 
-Distinguish them by timestamp before theorising:
+Distinguish them by timestamp:
 
 ```powershell
 Get-Item _target/{debug,release}/lib.dll | Select FullName, LastWriteTime
@@ -321,15 +310,10 @@ and a test lists the allowed files (`$RUST_OVERLAY_ROOT/standards/base/UNSAFE.md
 That is checkable, unlike "improve ergonomics", and it holds in a workspace where
 more than one crate meets a real OS or C boundary, which "one crate" does not.
 
-The measurable symptom of getting this wrong: in one workspace, frontends using the safe API had
-0 and 9 `unsafe` blocks; backends using the raw ABI had **~190 between them**, because
-the safe layer was entirely consumer-side and answered *how do I use a backend* but never
-*how do I write one*. Three memory-safety bugs came directly from that gap — a
-stack-allocated descriptor the callee kept a pointer to, a missing NULL array sentinel,
-and a `#[repr(C)]` mirror missing the struct's leading field, which shifted every
-subsequent field by one slot.
-
-An FFI crate should abstract **both sides** of the boundary.
+An FFI crate abstracts **both sides** of the boundary: a safe layer only for
+consumers leaves backend authors writing raw `unsafe`, where the bugs are a
+stack-allocated descriptor the callee keeps a pointer to, a missing NULL array
+sentinel, and a `#[repr(C)]` mirror missing the struct's leading field.
 
 ## Build-output naming: `_` prefix is a workspace-only disambiguator
 
@@ -339,12 +323,12 @@ inside one, plain `target/`/`build/` apply. Copying the prefix down is a common 
 and wrong twice: it implies a distinction that doesn't exist, and it makes each crate's
 `.gitignore` disagree with what cargo produces.
 
-Two traps seen together, both from writing ignore rules without checking:
+Two traps in ignore rules:
 
 - **Ignoring directories that don't exist.** With a workspace-level `target-dir` no
   crate has its own output dir, yet every crate ignored `/_build/` and `/target/`.
-  Entries describing nothing read as load-bearing — and propagate (they were later
-  copied into `Cargo.toml` `exclude` lists for the same non-existent paths).
+  Entries describing nothing read as load-bearing and propagate (into
+  `Cargo.toml` `exclude` lists).
 - **`/_*` as a catch-all** silently ignores *any* underscore-prefixed file, including
   legitimate source (`_private.rs`, `_internal/`). An ignore rule that can swallow
   source is worse than a missing one.
@@ -366,22 +350,18 @@ the rule.
 
 ## `cargo clippy --fix` is not a safe unattended edit
 
-It exits 0, the code compiles, and the tests pass — while having done two things
-beyond the fix it advertises. Both are invisible to the compiler, to the suite, and
-to a whitespace-ignoring diff. Measured on a 50-file `--fix` run over a 14-crate
-workspace (159 warning sites):
+It exits 0, the code compiles, and the tests pass, while it does two things beyond
+the fix. Both are invisible to the compiler, to the suite, and to a
+whitespace-ignoring diff:
 
 - **It writes LF into a CRLF file.** Where it only rewrites tokens *within* a line it
   preserves the file's endings; where it **reconstructs** lines — `items_after_test_module`
-  physically moves an item — it writes `\n`. One file went from 206 CRLF / 0 LF to
-  177 CRLF / **29 LF**, i.e. mixed. Mixed is the state that hurts, and why, is in
-  `~/.agents/kb/GIT.md` (the author's git notes, not part of this overlay) — this entry
-  only records that `--fix` is one of the tools that causes it.
+  physically moves an item — it writes `\n`. A CRLF file ends up
+  mixed, which is the state that hurts (`$ENGINEERING_OVERLAY_ROOT/kb/EOL.md`).
 - **Every let-chain it collapses is left mis-indented.** `collapsible_if` now produces
   `if a && let Some(x) = b`; the fix rewrites the condition and deletes the inner
   brace but does not re-indent the body, so the body and its closing brace sit one
-  level too deep and the brace ends up *shallower* than what it closes. 49 blocks
-  across 34 files in one run.
+  level too deep and the brace ends up *shallower* than what it closes.
 
 **`cargo fmt` is usually not the repair.** On a tree that has never been rustfmt-clean,
 `cargo fmt --all --check` reports thousands of diffs in files nothing touched, so
@@ -399,9 +379,7 @@ Procedure, and steps 4–5 are the ones that are easy to skip and produce no sym
 
 ## Android — a separate note
 
-Cross-compiling Rust for Android has its own file in the author's config
-(`~/.agents/kb/ANDROID.md`, not part of this overlay), because the failures are
-Android-specific and expensive: cc-rs cannot find the NDK's API-versioned
+Cross-compiling Rust for Android fails in Android-specific ways: cc-rs cannot find the NDK's API-versioned
 clang wrapper and falls back to a bare `clang.exe` with no `--sysroot`
 (`ring` reports `fatal error: 'assert.h' file not found`, which reads like a
 broken NDK rather than a missing flag), bindgen needs its own
@@ -417,8 +395,8 @@ C toolchain detail surfacing as an error that names something else.
 - **Both rustls crypto providers need `clang`** on `aarch64-pc-windows-msvc`, and neither
   failure names it clearly: `ring` reports `ToolNotFound: clang`; `aws-lc-rs` dies at
   `LNK1181` on a missing `.o`, many steps from the cause. Install LLVM. `rustls-rustcrypto`
-  is a pure-Rust fallback if a toolchain genuinely cannot have one, but it was
-  `0.0.2-alpha` at the time — a poor default for a library.
+  is a pure-Rust fallback if a toolchain genuinely cannot have one, but it is
+  alpha: a poor default for a library.
 - **`PROCESSOR_ARCHITECTURE` lies** in an emulated process: it reports `AMD64` while the
   OS is ARM64. Use `rustc -vV`, or the OS's own report, not the environment variable.
 - **x64 emulation is user-mode only.** No x64 *driver* can load on an ARM64 Windows
