@@ -52,11 +52,11 @@ def test_complex_directory_record_and_move(tmp_path):
     )
     rec = store.add("big-plan", meta={"title": "Big plan", "priority": "high"}, body="# Big plan\n", complex_dir=True)
     assert rec.path == tmp_path / "plans" / "draft" / "big-plan" / "README.md"
-    (rec.path.parent / "phase_1.md").write_text("# Phase 1\n", encoding="utf-8")
+    (rec.path.parent / "part_1.md").write_text("# Phase 1\n", encoding="utf-8")
 
     moved = store.move("big-plan", "ready")
     assert moved.path == tmp_path / "plans" / "ready" / "big-plan" / "README.md"
-    assert (tmp_path / "plans" / "ready" / "big-plan" / "phase_1.md").is_file()
+    assert (tmp_path / "plans" / "ready" / "big-plan" / "part_1.md").is_file()
     assert not (tmp_path / "plans" / "draft" / "big-plan").exists()
     assert len(store.require("big-plan").extras) == 1
 
