@@ -1413,7 +1413,8 @@ SCHEMA["deps"] = Key(
                 "bin": Key("str", "", "The binary an `item` installs; empty: the row's name."),
             },
         ),
-        "checkout": Key("str", "", "Where the deps branch is checked out; the environment variable BUILD_DEPS wins. Empty: a detached worktree beside the repository, named REPO-deps."),
+        "checkout": Key("str", "", "Where the deps branch is checked out; the environment variables of checkout_env and BUILD_DEPS win. Empty: a detached worktree beside the repository, named REPO-deps."),
+        "checkout_env": Key("strs", [], "Environment variables read, in order, before BUILD_DEPS: the first one that is set names the deps checkout (for a repository whose scripts already use another name)."),
         "allow": Key("strs", [], "Files a scan lets through, as GLOB:KIND (for example cdn/www.gstatic.com/flutter-canvaskit/*:wasm)."),
         "jobs": Key("int", 8, "Packages fetched at once."),
         "pin": Key(
@@ -1443,15 +1444,16 @@ def short(commit: str) -> str:
 
 
 def find_deps(ctx: Ctx, given: Path | None = None) -> Path:
-    """The deps checkout: --deps, $BUILD_DEPS, `[deps] checkout`, else a worktree beside the repository.
+    """The deps checkout: --deps, the `[deps] checkout_env` variables, $BUILD_DEPS, `[deps] checkout`, else a worktree beside the repository.
 
     The worktree is added detached at origin/deps (or deps) when missing, and moved to that
     branch's tip when it is detached; one on a branch is its owner's and is left alone.
     """
     if given is not None:
         return given.resolve()
-    if os.environ.get("BUILD_DEPS"):
-        return Path(os.environ["BUILD_DEPS"]).resolve()
+    for name in [*ctx.cfg.deps.checkout_env, "BUILD_DEPS"]:
+        if os.environ.get(name):
+            return Path(os.environ[name]).resolve()
     cfg = ctx.cfg.deps
     if cfg.checkout:
         path = Path(cfg.checkout)
@@ -2111,8 +2113,9 @@ def scan_command(ctx: Ctx, args: argparse.Namespace) -> int:
         scanned = 0
         base = args.tree.resolve()
         for current, dirs, names in os.walk(base):
+            # The top-level .git is a clone's directory or a linked worktree's `gitdir:` pointer file.
             dirs[:] = sorted(d for d in dirs if not (d == ".git" and Path(current) == base))
-            for name in sorted(names):
+            for name in sorted(n for n in names if not (n == ".git" and Path(current) == base)):
                 file = Path(current) / name
                 rel = file.relative_to(base).as_posix()
                 scanned += 1

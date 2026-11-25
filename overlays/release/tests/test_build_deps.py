@@ -1537,3 +1537,47 @@ def test_the_cdn_step_and_the_tree_step_leave_each_others_files_in_either_order(
     (deps / "cdn" / "other.txt").write_text("x", encoding="utf-8")
     changes, _ = build.sync_cdn(ctx, deps, None)
     assert changes == ["removed cdn/other.txt"], "the CDN step still removes what is not its own or a tree's"
+
+
+# --- a linked worktree's .git file, and the variable that names the checkout ----------------------------------------------
+
+
+def test_scan_tree_passes_a_linked_worktree_and_still_flags_a_nested_git(build, tmp_path, capsys):
+    main = init_repo(tmp_path / "main")
+    (main / "a.txt").write_text("a", encoding="utf-8")
+    commit_all(main)
+    worktree = tmp_path / "linked"
+    git(main, "worktree", "add", "-q", "--detach", str(worktree))
+    assert (worktree / ".git").is_file(), "a linked worktree's .git is a pointer file"
+    assert build.main(["--root", str(main), "scan", "--tree", str(worktree)]) == 0
+    assert "PASS: 0 flagged, 1 paths scanned" in capsys.readouterr().out
+    (worktree / "x").mkdir()
+    (worktree / "x" / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+    assert build.main(["--root", str(main), "scan", "--tree", str(worktree)]) == 1
+    out = capsys.readouterr().out
+    assert "FLAG a path below .git: 1" in out and "x/.git" in out
+    clone = tmp_path / "clone"
+    git(tmp_path, "clone", "-q", str(main), str(clone))
+    assert (clone / ".git").is_dir()
+    assert build.main(["--root", str(main), "scan", "--tree", str(clone)]) == 0
+
+
+def test_checkout_env_names_are_read_in_order_before_build_deps(build, tmp_path, monkeypatch, capsys):
+    root = tmp_path / "repo"
+    ctx_for(build, root, '[deps]\ncheckout_env = ["DEPS_A", "DEPS_B"]\n')
+    for name in ("DEPS_A", "DEPS_B", "BUILD_DEPS"):
+        monkeypatch.delenv(name, raising=False)
+
+    def found(*extra) -> Path:
+        assert build.main(["--root", str(root), "deps", "path", *extra]) == 0
+        return Path(capsys.readouterr().out.strip())
+
+    monkeypatch.setenv("BUILD_DEPS", str(tmp_path / "from-build-deps"))
+    assert found() == (tmp_path / "from-build-deps").resolve(), "with neither set the usual variable is read"
+    monkeypatch.setenv("DEPS_B", str(tmp_path / "b"))
+    assert found() == (tmp_path / "b").resolve()
+    monkeypatch.setenv("DEPS_A", str(tmp_path / "a"))
+    assert found() == (tmp_path / "a").resolve(), "the first name that is set wins"
+    assert found("--deps", str(tmp_path / "flag")) == (tmp_path / "flag").resolve(), "--deps wins over all"
+    monkeypatch.setenv("DEPS_A", "")
+    assert found() == (tmp_path / "b").resolve(), "an empty variable is not set"
