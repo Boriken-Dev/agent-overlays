@@ -24,9 +24,11 @@ from __future__ import annotations
 
 import argparse
 import collections
+import contextlib
 import fnmatch
 import gzip
 import hashlib
+import http.server
 import io
 import json
 import math
@@ -2308,6 +2310,11 @@ SCHEMA["flutter"] = Key(
         "version_item": Key("str", "app flutter-version", "The lock row naming the framework version `precache-check` expects."),
         "engine_item": Key("str", "app flutter-engine", "The lock row naming the engine revision."),
         "dart_item": Key("str", "app dart", "The lock row naming the Dart version."),
+        "commit_items": Key("strs", [], "Lock rows (`GROUP NAME`) whose VERSION `precache-check` accepts as the checkout's commit (the mirror's and the upstream commit it mirrors). Empty: the commit is not checked."),
+        "sdk_item": Key("str", "", "The git row (`GROUP NAME`) that is the Flutter SDK: `sdk install` checks it out on `branch` with its tags and precaches it."),
+        "engine_release": Key("str", "", "Where `sdk install` precaches from: the URL of the directory holding MANIFEST.txt and the assets of the engine's release, `{engine}` being the engine_item row's version (for example https://github.com/OWNER/flutter/releases/download/engine-{engine}). Empty: no precache; nothing falls back to Google's storage."),
+        "precache": Key("strs", ["web"], "The platforms `sdk install` precaches (`flutter precache --P`) and holds the checkout to: web, windows, linux, macos."),
+        "branch": Key("str", "main", "The branch the SDK's clone is checked out on (Flutter names its channel from it)."),
     },
 )
 SCHEMA["offline"] = Key(
@@ -3083,6 +3090,34 @@ def json_field(text: str, key: str) -> str:
     return found[1] if found else ""
 
 
+# Where a platform's files are below bin/cache of a Flutter checkout; {arch} is x64 or arm64.
+ENGINE_DIRS = {
+    "web": "flutter_web_sdk",
+    "windows": "artifacts/engine/windows-{arch}",
+    "linux": "artifacts/engine/linux-{arch}",
+    "macos": "artifacts/engine/darwin-x64",
+}
+
+
+def precache_missing(root: Path, platforms: list[str], arch: str, engine: str | None = None) -> dict[str, str]:
+    """Platform (or `engine.stamp`) to what is absent from bin/cache of a Flutter checkout; empty when it is precached."""
+    unknown = [p for p in platforms if p not in ENGINE_DIRS]
+    if unknown:
+        raise Usage(f"unknown platform {', '.join(unknown)}; one of {', '.join(ENGINE_DIRS)}")
+    cache = root / "bin" / "cache"
+    missing: dict[str, str] = {}
+    stamp = cache / "engine.stamp"
+    if not stamp.is_file():
+        missing["engine.stamp"] = "bin/cache/engine.stamp"
+    elif engine is not None and stamp.read_text(encoding="utf-8").strip() != engine:
+        missing["engine.stamp"] = f"bin/cache/engine.stamp is not {engine}"
+    for platform_name in platforms:
+        where = "bin/cache/" + ENGINE_DIRS[platform_name].format(arch=arch)
+        if not (root / where).is_dir():
+            missing[platform_name] = where
+    return missing
+
+
 def flutter_precache_check(ctx: Ctx, args: argparse.Namespace) -> int:
     """What Flutter reports about itself, against what the lock expects of that commit."""
     cfg = ctx.cfg.flutter
@@ -3113,6 +3148,15 @@ def flutter_precache_check(ctx: Ctx, args: argparse.Namespace) -> int:
     got = json_field(text, "dartSdkVersion")
     if want(cfg.dart_item) not in got:
         found.append(f"flutter's Dart is {got}, the lock says {want(cfg.dart_item)}")
+    if cfg.commit_items:
+        head = run_git("rev-parse", "HEAD", cwd=root) if git_ok("rev-parse", "HEAD", cwd=root) else ""
+        accepted = [want(row) for row in cfg.commit_items]
+        if head not in accepted:
+            found.append(f"flutter is at {head or 'no commit'}, the lock accepts " + " or ".join(f"{a} ({row})" for a, row in zip(accepted, cfg.commit_items)))
+    platforms = [p for p in (args.platform or "").split(",") if p]
+    for name, where in precache_missing(root, platforms, host_platform().split("-", 1)[1]).items():
+        if name != "engine.stamp":
+            found.append(f"flutter has no {name} files: {where} is missing; run flutter precache --{name}")
     if found:
         raise Problem("\n".join(found))
     print(f"ok: Flutter {want(cfg.version_item)}, engine {want(cfg.engine_item)[:12]}, Dart {want(cfg.dart_item)}")
@@ -3127,6 +3171,7 @@ def add_flutter(sub: argparse._SubParsersAction) -> None:
     junctions.set_defaults(run=flutter_junctions)
     check = commands.add_parser("precache-check", help="verify the checkout's version, engine and Dart against the SDK lock")
     check.add_argument("--flutter-root", type=Path, metavar="DIR", help="the Flutter checkout (default: $FLUTTER_ROOT)")
+    check.add_argument("--platform", metavar="LIST", help="also require these platforms' files (web, windows, linux, macos; comma separated) to be precached")
     check.set_defaults(run=flutter_precache_check)
 
 
@@ -3440,6 +3485,76 @@ def unpack(archive: Path, dest: Path, strip: int = 1) -> None:
         raise Problem(f"cannot unpack {archive.name}: only .zip, .tar.gz, .tar.xz and .tar.bz2")
 
 
+def engine_manifest(text: str) -> dict[str, tuple[str, int, str]]:
+    """MANIFEST.txt of an engine release: `path TAB sha256 TAB size TAB asset` per line, `#` for a comment."""
+    entries: dict[str, tuple[str, int, str]] = {}
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 4 or not HEX64.match(fields[1]) or not fields[2].isdigit():
+            raise Problem(f"MANIFEST.txt:{number}: expected `path TAB sha256 TAB size TAB asset`")
+        path, digest, size, asset = fields
+        if not path or unsafe_member(path) or "\\" in path or "/" in asset or not asset:
+            raise Problem(f"MANIFEST.txt:{number}: {path!r} or {asset!r} is not a safe name")
+        entries[path] = (digest, int(size), asset)
+    return entries
+
+
+def fetch_engine_tree(base: str, tree: Path) -> int:
+    """Puts the assets of an engine release back in the layout Flutter's storage has, below `tree`; returns how many were fetched.
+
+    A file already there with the manifest's size and SHA-256 is kept. A download that is not what the manifest says is refused.
+    """
+    base = base.rstrip("/")
+    entries = engine_manifest(fetch(f"{base}/MANIFEST.txt").decode("utf-8"))
+    if not entries:
+        raise Problem(f"{base}/MANIFEST.txt lists nothing")
+    fetched = 0
+    for path, (digest, size, asset) in sorted(entries.items()):
+        target = tree / path
+        if target.is_file() and target.stat().st_size == size and sha256(target.read_bytes()) == digest:
+            continue
+        data = fetch(f"{base}/{urllib.parse.quote(asset)}")
+        if len(data) != size or sha256(data) != digest:
+            raise Problem(f"refused {base}/{asset}: {len(data)} bytes with SHA-256 {sha256(data)}, MANIFEST.txt says {size} and {digest}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        partial = target.with_name(target.name + ".partial")
+        partial.write_bytes(data)
+        os.replace(partial, target)
+        fetched += 1
+    return fetched
+
+
+@contextlib.contextmanager
+def serve_tree(tree: Path) -> Iterator[tuple[int, list[str]]]:
+    """Serves a directory on 127.0.0.1 (GET and HEAD) while the block runs; yields (port, the paths asked for that it lacks)."""
+    misses: list[str] = []
+    lock = threading.Lock()
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, directory=str(tree), **kwargs)
+
+        def log_request(self, code: Any = "-", size: Any = "-") -> None:
+            if str(code) in ("404", "HTTPStatus.NOT_FOUND") or getattr(code, "value", None) == 404:
+                with lock:
+                    misses.append(self.path)
+
+        def log_error(self, *args: Any) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address[1], misses
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(30)
+
+
 class Installer:
     """What `sdk install` does for one platform, prefix and set of groups."""
 
@@ -3716,14 +3831,60 @@ class Installer:
             self.paths.append(str(directory / "bin" if (directory / "bin").is_dir() else directory))
 
     # git items
+    def flutter_precache(self, directory: Path, url: str) -> None:
+        """The Flutter SDK precached for `[flutter] precache` from the engine's release, never from Google's storage."""
+        cfg = self.ctx.cfg.flutter
+        arch = self.plat.split("-", 1)[1]
+        engine = next((i.version for i in self.items if f"{i.group} {i.name}" == cfg.engine_item), None)
+        if not cfg.engine_release:
+            self.report("flutter precache", "not configured ([flutter] engine_release)")
+            return
+        missing = precache_missing(directory, cfg.precache, arch, engine)
+        if self.check or not missing:
+            for name in cfg.precache:
+                if name in missing or "engine.stamp" in missing:
+                    self.need(f"flutter precache {name}", f"missing, {missing.get(name) or missing['engine.stamp']}")
+                else:
+                    self.report(f"flutter precache {name}", "ok")
+            return
+        if engine is None:
+            raise Problem(f"[flutter] engine_item names no `{cfg.engine_item}` row to fill {{engine}} in engine_release with")
+        base = cfg.engine_release.replace("{engine}", engine)
+        tree = self.prefix / "flutter-artifacts"
+        self.report("flutter precache", f"fetching {base}")
+        self.report("flutter precache", f"{fetch_engine_tree(base, tree)} files fetched")
+        flutter = str(directory / "bin" / ("flutter.bat" if self.windows else "flutter"))
+        with serve_tree(tree) as (port, misses):
+            env = {
+                **self.tool_env,
+                "FLUTTER_STORAGE_BASE_URL": f"http://127.0.0.1:{port}",
+                "FLUTTER_GIT_URL": url,
+                "FLUTTER_ROOT": str(directory),
+                "CI": "true",
+                "TAR_OPTIONS": "--no-same-owner",
+                "FLUTTER_SUPPRESS_ANALYTICS": "true",
+                "DART_SUPPRESS_ANALYTICS": "true",
+            }
+            run_tool([flutter, "config", "--no-analytics", "--no-cli-animations"], env, directory)
+            run_tool([flutter, "precache", *(f"--{p}" for p in cfg.precache)], env, directory)
+            run_tool([flutter, "--version"], env, directory)
+        if misses:
+            raise Problem("flutter asked the engine release for files it does not hold:\n" + "\n".join(f"  {m}" for m in sorted(set(misses))))
+        still = precache_missing(directory, cfg.precache, arch, engine)
+        if still:
+            raise Problem("flutter precache left " + ", ".join(f"{k} ({v})" for k, v in still.items()))
+        self.report("flutter precache", "installed")
+
     def git_items(self) -> None:
         cfg = self.ctx.cfg.sdk
+        cfg_flutter = self.ctx.cfg.flutter
         for item in self.items:
             if item.group not in self.groups or item.group == "system" or not item.url.endswith(".git") or not item.url.startswith("https://"):
                 continue
             url = os.environ.get(f"BUILD_SDK_GIT_URL_{re.sub(r'[^A-Za-z0-9]', '_', item.name).upper()}") or cfg.git_urls.get(item.name) or item.url
             directory = self.prefix / "git" / item.name / item.version[:12]
             self.dirs[f"{item.group} {item.name}"] = directory
+            sdk = f"{item.group} {item.name}" == cfg_flutter.sdk_item
             label = f"{item.name} {item.version[:12]}"
             ready = (directory / ".git").exists() and git_ok("rev-parse", "HEAD", cwd=directory) and run_git("rev-parse", "HEAD", cwd=directory) == item.version
             if ready:
@@ -3739,7 +3900,12 @@ class Installer:
                 # A commit-only clone fetches just the trees and files of this revision, and keeps
                 # the history a tool that reads tags and commits needs.
                 run_git("-c", "core.autocrlf=false", "clone", "-q", "--filter=tree:0", "--no-checkout", url, str(partial))
-                run_git("-C", str(partial), "checkout", "-q", "--detach", item.version)
+                if sdk:
+                    # Flutter names its channel after the branch and reads its tags for the version.
+                    run_git("-C", str(partial), "checkout", "-q", "-B", cfg_flutter.branch, item.version)
+                    run_git("-C", str(partial), "fetch", "-q", "--no-tags", "origin", "+refs/tags/*:refs/tags/*")
+                else:
+                    run_git("-C", str(partial), "checkout", "-q", "--detach", item.version)
                 shutil.rmtree(directory, ignore_errors=True)
                 os.replace(partial, directory)
                 self.report(label, "installed")
@@ -3759,6 +3925,8 @@ class Installer:
                 run_tool([str(exe), *command[1:]], self.tool_env, cwd=directory)
                 stamp.write_text("", encoding="utf-8")
                 self.report(f"{item.name} {post.run[0]}", "ran")
+            if sdk:
+                self.flutter_precache(directory, url)
 
     # Python virtual environments
     def venvs(self) -> None:

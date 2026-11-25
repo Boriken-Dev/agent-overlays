@@ -668,3 +668,112 @@ def test_offline_run_runs_nothing_when_offline_is_not_possible(build, app, offli
     assert "offline is not possible: no deps checkout" in capsys.readouterr().err and not ran.exists()
     assert build.main(["--root", str(root), "offline", "env", *nowhere]) == 1
     assert "offline is not possible" in capsys.readouterr().err
+
+
+# --- the Flutter commit and the platform files ------------------------------------------------------------------------
+
+
+def test_the_commit_must_be_one_the_lock_accepts_when_commit_items_names_rows(build, flutter_root, capsys):
+    from conftest import git
+
+    root, sdk = flutter_root
+    init_repo(sdk)
+    (sdk / "f.txt").write_text("1", encoding="utf-8")
+    first = commit_all(sdk, "one")
+    (sdk / "f.txt").write_text("2", encoding="utf-8")
+    second = commit_all(sdk, "two")
+    lock = LOCK.replace("a" * 40, second) + f"app flutter-upstream {first} any - -\n"
+    (root / "tools" / "sdk.lock").write_text(lock, encoding="utf-8")
+    argv = ["--root", str(root), "flutter", "precache-check", "--flutter-root", str(sdk)]
+    assert build.main(argv) == 0, "without commit_items the commit is not checked"
+    ctx_for(build, root, '[flutter]\ncommit_items = ["app flutter", "app flutter-upstream"]\n')
+    assert build.main(argv) == 0
+    git(sdk, "checkout", "-q", first)
+    assert build.main(argv) == 0, "the upstream commit is accepted too"
+    (sdk / "f.txt").write_text("3", encoding="utf-8")
+    third = commit_all(sdk, "three")
+    capsys.readouterr()
+    assert build.main(argv) == 1
+    err = capsys.readouterr().err
+    assert f"flutter is at {third}, the lock accepts {second} (app flutter) or {first} (app flutter-upstream)" in err
+
+
+def test_a_platform_the_checkout_lacks_is_named_one_line_each(build, flutter_root, capsys):
+    root, sdk = flutter_root
+    arch = build.host_platform().split("-", 1)[1]
+    argv = ["--root", str(root), "flutter", "precache-check", "--flutter-root", str(sdk), "--platform", "web,windows,linux,macos"]
+    assert build.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "flutter has no web files: bin/cache/flutter_web_sdk is missing" in err
+    assert f"bin/cache/artifacts/engine/windows-{arch}" in err and f"bin/cache/artifacts/engine/linux-{arch}" in err
+    assert "bin/cache/artifacts/engine/darwin-x64" in err and err.count("flutter has no") == 4
+    cache = sdk / "bin" / "cache"
+    for folder in ("flutter_web_sdk", f"artifacts/engine/windows-{arch}", f"artifacts/engine/linux-{arch}", "artifacts/engine/darwin-x64"):
+        (cache / folder).mkdir(parents=True)
+    assert build.main(argv) == 0
+    with pytest.raises(SystemExit):
+        build.main([*argv[:-1], "plan9"])
+    assert "unknown platform plan9" in capsys.readouterr().err
+
+
+# --- the engine release -----------------------------------------------------------------------------------------------
+
+
+def manifest_of(entries: dict[str, bytes]) -> str:
+    import hashlib
+
+    lines = ["# Flutter engine: artifacts as published, unchanged.", "# path\tsha256\tsize\tasset"]
+    for path, body in sorted(entries.items()):
+        lines.append(f"{path}\t{hashlib.sha256(body).hexdigest()}\t{len(body)}\t{path.replace('/', '-')}")
+    return "\n".join(lines) + "\n"
+
+
+def test_the_manifest_is_read_by_tabs_and_comments_are_skipped(build):
+    text = manifest_of({"a/b.zip": b"x"})
+    entries = build.engine_manifest(text)
+    assert list(entries) == ["a/b.zip"] and entries["a/b.zip"][1:] == (1, "a-b.zip")
+    with pytest.raises(build.Problem, match="MANIFEST.txt:1: expected"):
+        build.engine_manifest("only one field\n")
+    with pytest.raises(build.Problem, match="not a safe name"):
+        build.engine_manifest(f"../x\t{'a' * 64}\t1\tasset\n")
+
+
+def test_the_tree_is_fetched_verified_and_a_file_already_there_is_kept(build, tmp_path, monkeypatch):
+    files = {"flutter_infra_release/web/a.zip": b"aaa", "flutter_infra_release/web/b.zip": b"bbbb"}
+    served = {"https://r.test/engine-1/MANIFEST.txt": manifest_of(files).encode()}
+    served.update({f"https://r.test/engine-1/{p.replace('/', '-')}": body for p, body in files.items()})
+    asked: list[str] = []
+    monkeypatch.setattr(build, "fetch", lambda url: asked.append(url) or served[url])
+    tree = tmp_path / "tree"
+    kept = tree / "flutter_infra_release" / "web" / "a.zip"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"aaa")
+    assert build.fetch_engine_tree("https://r.test/engine-1/", tree) == 1
+    assert (tree / "flutter_infra_release" / "web" / "b.zip").read_bytes() == b"bbbb"
+    assert not any(u.endswith("flutter_infra_release-web-a.zip") for u in asked), "a verified file is not fetched again"
+    assert build.fetch_engine_tree("https://r.test/engine-1", tree) == 0
+    served["https://r.test/engine-1/flutter_infra_release-web-b.zip"] = b"BBBB"
+    (tree / "flutter_infra_release" / "web" / "b.zip").unlink()
+    with pytest.raises(build.Problem, match="refused https://r.test/engine-1/flutter_infra_release-web-b.zip"):
+        build.fetch_engine_tree("https://r.test/engine-1", tree)
+    assert not (tree / "flutter_infra_release" / "web" / "b.zip").exists(), "a download that is not what the manifest says is not kept"
+
+
+def test_the_served_tree_answers_get_and_head_on_loopback_and_records_each_miss(build, tmp_path):
+    import urllib.error
+    import urllib.request
+
+    (tmp_path / "t" / "d").mkdir(parents=True)
+    (tmp_path / "t" / "d" / "here.txt").write_bytes(b"hello")
+    with build.serve_tree(tmp_path / "t") as (port, misses):
+        base = f"http://127.0.0.1:{port}"
+        assert urllib.request.urlopen(f"{base}/d/here.txt").read() == b"hello"
+        head = urllib.request.urlopen(urllib.request.Request(f"{base}/d/here.txt", method="HEAD"))
+        assert head.status == 200 and head.headers["Content-Length"] == "5"
+        for method in ("GET", "HEAD"):
+            with pytest.raises(urllib.error.HTTPError) as gone:
+                urllib.request.urlopen(urllib.request.Request(f"{base}/d/nope-{method}.txt", method=method))
+            assert gone.value.code == 404
+        assert misses == ["/d/nope-GET.txt", "/d/nope-HEAD.txt"]
+    with pytest.raises(OSError):
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/d/here.txt", timeout=2)

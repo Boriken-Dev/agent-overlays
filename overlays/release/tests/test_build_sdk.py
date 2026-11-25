@@ -748,3 +748,141 @@ def test_a_vendored_tool_is_built_offline_from_its_folder_and_the_target_is_repo
     config = Path(built[5]).read_text()
     assert (deps / "crates-tool").resolve().as_posix() in config and "offline = true" in config
     assert str(tmp_path / "sdk") in built[5], "the cargo home is written in the prefix, outside the repository"
+
+
+# --- a Flutter SDK cloned at its commit and precached from an engine release ---------------------------------------------
+
+ENGINE = "e" * 40
+RELEASE = "https://releases.test/engine-{engine}"
+ENGINE_FILES = {"flutter_infra_release/flutter/web/a.zip": b"aaa", "flutter_infra_release/flutter/web/b.zip": b"bbbb"}
+
+
+def flutter_setup(build, tmp_path, machine, monkeypatch, *, release: str = RELEASE, asks: tuple[str, ...] = ("/flutter_infra_release/flutter/web/a.zip",)):
+    """A fake Flutter origin, a locked row for it and an engine release; `flutter precache` is a fake that asks `asks`."""
+    import hashlib
+    import urllib.error
+    import urllib.request
+
+    origin = init_repo(tmp_path / "flutter-origin")
+    (origin / "bin").mkdir()
+    (origin / "bin" / "flutter").write_text("#!/bin/sh\n", encoding="utf-8")
+    commit = commit_all(origin, "flutter")
+    git(origin, "tag", "3.50.0")
+    rows = good_rows() + [
+        f"app flutter {commit} any - https://example.test/org/flutter.git",
+        f"app flutter-engine {ENGINE} any - -",
+    ]
+    cfg = (
+        f'[sdk]\ninstall = ["core", "app"]\ngroups = ["core", "app"]\ngit_urls = {{ flutter = "{origin.as_uri()}" }}\n'
+        f'[flutter]\nsdk_item = "app flutter"\nengine_release = "{release}"\nprecache = ["web"]\n'
+    )
+    root = sdk_repo(build, tmp_path, rows, cfg)
+    manifest = ["# path\tsha256\tsize\tasset"] + [
+        f"{p}\t{hashlib.sha256(b).hexdigest()}\t{len(b)}\t{p.rsplit('/', 1)[1]}" for p, b in sorted(ENGINE_FILES.items())
+    ]
+    served = {f"https://releases.test/engine-{ENGINE}/MANIFEST.txt": "\n".join(manifest).encode() + b"\n"}
+    served.update({f"https://releases.test/engine-{ENGINE}/{p.rsplit('/', 1)[1]}": b for p, b in ENGINE_FILES.items()})
+    asked: list[str] = []
+    monkeypatch.setattr(build, "fetch", lambda url: asked.append(url) or served.get(url, RUSTUP))
+    flutter_runs: list[tuple[list[str], dict[str, str], str]] = []
+    answers: list[tuple[str, int]] = []
+    base_run = machine.run
+
+    def run(command, env=None, cwd=None):
+        command = [str(c) for c in command]
+        if Path(command[0]).name in ("flutter", "flutter.bat"):
+            flutter_runs.append((command, dict(env or {}), str(cwd)))
+            if command[1] == "precache":
+                for path in asks:
+                    try:
+                        answers.append((path, urllib.request.urlopen(env["FLUTTER_STORAGE_BASE_URL"] + path).status))
+                    except urllib.error.HTTPError as error:
+                        answers.append((path, error.code))
+                cache = Path(cwd) / "bin" / "cache"
+                (cache / "flutter_web_sdk").mkdir(parents=True)
+                (cache / "engine.stamp").write_text(ENGINE + "\n", encoding="utf-8")
+            return
+        base_run(command, env, cwd)
+
+    monkeypatch.setattr(build, "run_tool", run)
+    return root, commit, asked, flutter_runs, answers
+
+
+def test_the_flutter_sdk_is_cloned_on_the_branch_with_its_tags_and_precached_from_the_release(build, tmp_path, machine, monkeypatch, capsys):
+    root, commit, asked, runs, answers = flutter_setup(build, tmp_path, machine, monkeypatch)
+    prefix = tmp_path / "sdk"
+    assert install(build, root, prefix) == 0
+    clone = prefix / "git" / "flutter" / commit[:12]
+    assert git(clone, "rev-parse", "HEAD") == commit and git(clone, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert "3.50.0" in git(clone, "tag").split(), "the tags are fetched"
+    tree = prefix / "flutter-artifacts" / "flutter_infra_release" / "flutter" / "web"
+    assert (tree / "a.zip").read_bytes() == b"aaa" and (tree / "b.zip").read_bytes() == b"bbbb"
+    assert [c[1:] for c, _, _ in runs] == [["config", "--no-analytics", "--no-cli-animations"], ["precache", "--web"], ["--version"]]
+    command, env, cwd = runs[1]
+    assert Path(cwd) == clone and re.fullmatch(r"http://127\.0\.0\.1:\d+", env["FLUTTER_STORAGE_BASE_URL"])
+    assert env["FLUTTER_GIT_URL"] == (tmp_path / "flutter-origin").as_uri() and env["FLUTTER_ROOT"] == str(clone)
+    assert (env["CI"], env["TAR_OPTIONS"], env["FLUTTER_SUPPRESS_ANALYTICS"], env["DART_SUPPRESS_ANALYTICS"]) == ("true", "--no-same-owner", "true", "true")
+    assert answers == [("/flutter_infra_release/flutter/web/a.zip", 200)]
+    assert not any("storage.googleapis.com" in u for u in asked)
+    out = capsys.readouterr().out
+    assert "2 files fetched" in out and "flutter precache" in out and "installed" in out
+    assert install(build, root, prefix) == 0 and len(runs) == 3, "a precached checkout is left alone"
+    assert install(build, root, prefix, "--check") == 0
+    assert "flutter precache web" in capsys.readouterr().out
+
+
+def test_a_request_the_release_does_not_hold_fails_the_install(build, tmp_path, machine, monkeypatch, capsys):
+    root, _, _, runs, answers = flutter_setup(
+        build, tmp_path, machine, monkeypatch, asks=("/flutter_infra_release/flutter/web/a.zip", "/flutter_infra_release/flutter/other/missing.zip")
+    )
+    assert install(build, root, tmp_path / "sdk") == 1
+    err = capsys.readouterr().err
+    assert "asked the engine release for files it does not hold" in err and "/flutter_infra_release/flutter/other/missing.zip" in err
+    assert answers[1] == ("/flutter_infra_release/flutter/other/missing.zip", 404)
+
+
+def test_a_file_that_is_not_what_the_manifest_says_is_refused_and_a_kept_one_is_reused(build, tmp_path, machine, monkeypatch, capsys):
+    root, commit, asked, runs, _ = flutter_setup(build, tmp_path, machine, monkeypatch)
+    prefix = tmp_path / "sdk"
+    kept = prefix / "flutter-artifacts" / "flutter_infra_release" / "flutter" / "web" / "a.zip"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"aaa")
+    served = build.fetch
+    monkeypatch.setattr(build, "fetch", lambda url: b"BBBB" if url.endswith("b.zip") else served(url))
+    assert install(build, root, prefix) == 1
+    assert "refused https://releases.test/engine-" in capsys.readouterr().err and runs == []
+    assert not any(u.endswith("a.zip") for u in asked), "the kept file matches the manifest and is not fetched"
+    monkeypatch.setattr(build, "fetch", served)
+    assert install(build, root, prefix) == 0 and len(runs) == 3
+
+
+def test_without_an_engine_release_nothing_is_precached_and_google_is_never_asked(build, tmp_path, machine, monkeypatch, capsys):
+    root, _, asked, runs, _ = flutter_setup(build, tmp_path, machine, monkeypatch, release="")
+    assert install(build, root, tmp_path / "sdk") == 0
+    assert "flutter precache" in capsys.readouterr().out and runs == [] and [u for u in asked if "rust-lang" not in u] == []
+    assert install(build, root, tmp_path / "sdk", "--check") == 0
+    assert "not configured ([flutter] engine_release)" in capsys.readouterr().out
+
+
+def test_check_names_each_platform_not_yet_precached(build, tmp_path, machine, monkeypatch, capsys):
+    root, commit, _, _, _ = flutter_setup(build, tmp_path, machine, monkeypatch)
+    prefix = tmp_path / "sdk"
+    install(build, root, prefix)
+    capsys.readouterr()
+    import shutil
+
+    shutil.rmtree(prefix / "git" / "flutter" / commit[:12] / "bin" / "cache" / "flutter_web_sdk")
+    assert install(build, root, prefix, "--check") == 1
+    out = capsys.readouterr().out
+    assert "flutter precache web" in out and "missing, bin/cache/flutter_web_sdk" in out
+
+
+def test_a_sliced_agree_value_holds_a_ten_character_tag_to_the_row(build, tmp_path, capsys):
+    commit = "33d7f282aaef7665096e5acd368d3c2ee226f6bb"
+    rows = good_rows() + [f"app flutter {commit} any - https://github.com/Boriken-Dev/flutter.git"]
+    rule = 'item = "app flutter"\nexpect = "{version:.10}"\nfile = "Containerfile"\npattern = "^ARG FLUTTER_IMAGE_TAG=(\\\\S+)$"'
+    root = agree_repo(build, tmp_path, rule, "ARG FLUTTER_IMAGE_TAG=33d7f282aa\n", "Containerfile", rows)
+    assert check(build, root) == 0
+    (root / "Containerfile").write_text("ARG FLUTTER_IMAGE_TAG=33d7f282ab\n", encoding="utf-8")
+    assert check(build, root) == 1
+    assert "has ['33d7f282ab'], the lock 33d7f282aa" in capsys.readouterr().err
