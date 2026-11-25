@@ -124,6 +124,24 @@ A section the configuration leaves out is off.
 - `flutter junctions` recreates the Windows plugin links `flutter build windows` needs, as directory junctions that need no
   Developer Mode; `flutter precache-check` compares a Flutter checkout's version, engine stamp and Dart with the SDK lock rows
   named in `[flutter]`.
+- `[flutter] commit_items` (rows `GROUP NAME`, for example the mirror's `app flutter` and the upstream commit it mirrors,
+  `app flutter-upstream`) makes `precache-check` also require `git rev-parse HEAD` to be the version of one of them; empty
+  leaves the commit unchecked. `precache-check --platform web,windows,linux,macos` also requires each platform's files under
+  `bin/cache`: `flutter_web_sdk`, `artifacts/engine/windows-ARCH`, `artifacts/engine/linux-ARCH` and
+  `artifacts/engine/darwin-x64` (`ARCH` is `x64` or `arm64`, this machine's), one line for each that is missing.
+- `sdk install` precaches the Flutter SDK from the engine's release, never from Google's storage. `[flutter] sdk_item` names
+  the git row that is the SDK: its clone is checked out with `git checkout -B BRANCH COMMIT` (`branch`, default `main`, since
+  Flutter names its channel from it) and its tags are fetched. `engine_release` is the directory of the engine's release,
+  with `{engine}` replaced by the `engine_item` row's version (`https://github.com/OWNER/flutter/releases/download/engine-{engine}`):
+  it holds `MANIFEST.txt` (`path TAB sha256 TAB size TAB asset`, `#` comments) and the assets. When the stamp
+  `bin/cache/engine.stamp` or a `precache` platform's folder (default `["web"]`) is missing, build.py fetches each asset into
+  `PREFIX/flutter-artifacts/PATH` (a file already there with the manifest's size and SHA-256 is kept, a download that is not
+  what the manifest says is refused), serves that tree on `127.0.0.1` itself, and runs `flutter config --no-analytics
+  --no-cli-animations`, `flutter precache --web ...` and `flutter --version` under `FLUTTER_STORAGE_BASE_URL` pointing at it,
+  `FLUTTER_GIT_URL` the row's URL, `FLUTTER_ROOT`, `CI=true`, `TAR_OPTIONS=--no-same-owner` and both analytics variables. A
+  request the release does not hold fails the install and is listed. With `engine_release` empty nothing is precached
+  (`flutter precache  not configured ([flutter] engine_release)`); nothing ever falls back to Google, and build.py runs no
+  downloaded script. `sdk install --check` prints `flutter precache P  ok|missing` for each platform.
 
 ## The SDK lock (`sdk`)
 
@@ -137,7 +155,8 @@ version column is the group that needs it), and no version floats (`latest`, `st
   `@deps` for `--deps-ref`) whose value must equal, prefix-match, set-match or be among the lock's rows (`match`). That is how
   `rust-version`, a pinned nightly in workflows, a container digest, `ARG`s in a Dockerfile or a requirements file are held to
   the lock. `--online` compares each download's hash with what its publisher says (rustup's `.sha256`, Node's
-  `SHASUMS256.txt`, a GitHub release asset's `digest`).
+  `SHASUMS256.txt`, a GitHub release asset's `digest`). `expect` is a Python format string, so a slice works: a Containerfile's
+  `ARG FLUTTER_IMAGE_TAG=` that is the first ten digits of a commit is held to the row with `expect = "{version:.10}"`.
 - `sdk install [--groups a,b] [--prefix DIR] [--check] [--print-system] [--platform OS-ARCH]` installs the groups under one
   prefix (default `$BUILD_SDK_HOME`, else `~/.REPO-sdk`) and never touches the shell profile, PATH or the system, and never
   elevates: rustup without profile edits, each `rust` row as a toolchain (numeric versions with the `rust-component` and
