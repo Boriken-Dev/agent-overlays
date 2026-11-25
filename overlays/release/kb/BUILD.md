@@ -42,13 +42,32 @@ dotfiles (`.editorconfig`, `.travis.yml`, `justfile`, `flake.nix`, ...); a file 
 PEM private key are defanged; nothing an archive scanner would refuse stays. `manifest.json` records the format, the source
 commit and the SHA-256 of `Cargo.lock`, and the checks read it.
 
+- **Several vendor folders.** `[[deps.vendor]]` lists one folder per lock, since two locks may need two sources of one
+  package (another git revision of a crate) and a folder is never shared. `folder` is one path segment; exactly one of
+  `lock` (a `Cargo.lock` of the repository) and `item` (an SDK-lock row `GROUP NAME` naming a crate that `cargo install
+  --locked` builds: its lock is the `Cargo.lock` packaged in `FOLDER/NAME-VERSION/`, and the row's SHA-256 is the `.crate`
+  file's `cksum` from the crates.io index, which `deps sync` needs and `deps check` only notes when it is `-`) is given;
+  `bin` is the binary an item installs (default the row's name). The first table is the primary vendor, the one `deps use`,
+  `offline plan` and `release build --offline` take, and `[deps] cargo_lock` is unused once a list exists; without a list
+  there is one vendor, `crates`, over `cargo_lock`. `deps sync` and `deps check` cover every vendor, `deps refresh` always
+  does, and `--vendor FOLDER` on `sync`, `check`, `use` and `offline plan` picks one (`--cargo-lock` then replaces that
+  vendor's lock; an item vendor refuses it). A problem names its folder: `crates-web_noise/js-sys-0.3.105: missing, Cargo.lock
+  names it`, and `deps check` ends with `ok: FOLDER N crates, M git sources cover LOCK` for each.
+- **`manifest.json`, formats 1 and 2.** Without `[[deps.vendor]]` it is format 1 as always (`cargoLockSha256`, `crates`,
+  `gitSources`). With vendors it is format 2: `vendors` maps each folder to `{lock | item, lockSha256, crates, gitSources}`
+  beside the `pub` and `cdn` sections. The tool owns only `format`, `sourceCommit`, `cargoLockSha256`, `crates`,
+  `gitSources`, `vendors`, `pub`, `cdn` and `trees`; every other top-level key another writer put there is kept, and an owned
+  section that is turned off disappears at the next sync. A format-2 manifest that does not record a configured vendor gives
+  a note, never a problem; any other format is a problem.
+
 - Run `deps init` once, then `deps refresh` on a clean main: it syncs, commits on the deps branch, rewrites `[[deps.repin]]`
   files to the new commit, then commits the `[deps] pin` row of an SDK lock on main and checks the result. Push the deps
   branch first, then main. Refresh runs locally and commits as whoever `git config` names; CI only checks.
 - `deps check --ref COMMIT` holds a commit of the repository (fetched with `git fetch --depth 1 origin COMMIT`) to the lock and
   to the scanner: symlinks, `.git` paths and refused kinds are named. `--quick` reads package metadata only, as `deps use` does.
 - `deps use` writes a cargo home outside the repository that replaces every source by the checkout's `crates/`;
-  `--repo-config` also writes `.cargo/config.toml`, `--json` prints the result for a script.
+  `--repo-config` also writes `.cargo/config.toml`, `--json` prints the result for a script (one vendor: the first, or
+  `--vendor`).
 - The checkout is found by `--deps`, `$BUILD_DEPS`, `[deps] checkout`, else a detached worktree `../REPO-deps`
   of `origin/deps` that `deps path` adds when it is missing. `deps refresh` needs the worktree on the branch (`deps init`).
 - A mirror of crates.io is `[deps] crates_url` or `$BUILD_CRATES_URL`.
@@ -101,6 +120,11 @@ version column is the group that needs it), and no version floats (`latest`, `st
   `env.sh`/`env.ps1` written (`[sdk.env]` and `[sdk] path` add variables and directories). Every download is verified against
   the lock before it is used. `--check` installs nothing and exits 1 when something is missing; `system` rows are only checked,
   and `--print-system` prints `[sdk.system] print` for the platform.
+- A `[[deps.vendor]]` item (a tool built from the crate on the deps branch) is installed with `cargo --config CONFIG install
+  --offline --locked NAME --version V`, `CONFIG` being the cargo home `deps use` writes for its folder under the prefix; it
+  needs the deps checkout (`--deps DIR`, else the usual lookup) and never falls back to the network: with none, `--check`
+  says `needs a deps checkout` and the install stops. Each `rust-target` row of a numeric toolchain prints a line
+  `rust-target TARGET (TOOLCHAIN)  ok|missing`; a missing target is named, and no build command ever adds one.
 
 ## Release builds (`release`)
 
