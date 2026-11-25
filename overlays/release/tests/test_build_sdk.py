@@ -886,3 +886,69 @@ def test_a_sliced_agree_value_holds_a_ten_character_tag_to_the_row(build, tmp_pa
     (root / "Containerfile").write_text("ARG FLUTTER_IMAGE_TAG=33d7f282ab\n", encoding="utf-8")
     assert check(build, root) == 1
     assert "has ['33d7f282ab'], the lock 33d7f282aa" in capsys.readouterr().err
+
+# --- a cargo tool of a group installed without the rust rows --------------------------------------------------------------
+
+WASM_CFG = '[sdk]\ninstall = ["core"]\ngroups = ["core", "app"]\n[[deps.vendor]]\nfolder = "crates-tool"\nitem = "app tool"\nbin = "tool-bin"\n'
+
+
+def app_tool_repo(build, tmp_path):
+    from test_build_deps import vendored
+
+    root = sdk_repo(build, tmp_path, good_rows() + ["app tool 1.0.0 any " + "a" * 64 + " -"], WASM_CFG)
+    lock = 'version = 4\n[[package]]\nname = "tool"\nversion = "1.0.0"\n'
+    deps = tmp_path / "deps"
+    vendored(build, deps / "crates-tool", "tool-1.0.0", "a" * 64, extra={"Cargo.lock": lock.encode()})
+    return root, deps
+
+
+def record_envs(build, machine, monkeypatch):
+    seen: list[tuple[list[str], dict[str, str]]] = []
+    base = machine.run
+
+    def run(command, env=None, cwd=None):
+        seen.append(([str(c) for c in command], dict(env or {})))
+        base(command, env, cwd)
+
+    monkeypatch.setattr(build, "run_tool", run)
+    return seen
+
+
+def test_groups_app_alone_installs_a_vendored_tool_with_the_cargo_on_path_and_no_rust_row(build, tmp_path, machine, monkeypatch, capsys):
+    root, deps = app_tool_repo(build, tmp_path)
+    seen = record_envs(build, machine, monkeypatch)
+    monkeypatch.setattr(build.shutil, "which", lambda name, *a, **k: "/usr/bin/cargo" if name == "cargo" else None)
+    prefix = tmp_path / "sdk"
+    assert install(build, root, prefix, "--groups", "app", "--deps", str(deps)) == 0
+    assert len(seen) == 1, "no rustup, no toolchain, no target: only the tool"
+    command, env = seen[0]
+    assert command[0] == "/usr/bin/cargo" and command[1] == "--config" and command[3:] == ["install", "--offline", "--locked", "tool", "--version", "1.0.0"]
+    assert env["CARGO_HOME"] == str(prefix / "rust" / "cargo") and env.get("RUSTUP_HOME") != str(prefix / "rust" / "rustup")
+    assert "tool 1.0.0" in capsys.readouterr().out and not (prefix / "rust" / "cargo" / "bin" / "rustup").exists()
+
+
+def test_groups_app_alone_uses_the_toolchain_the_lock_names_when_the_prefix_has_it(build, tmp_path, machine, monkeypatch):
+    root, deps = app_tool_repo(build, tmp_path)
+    prefix = tmp_path / "sdk"
+    assert install(build, root, prefix, "--groups", "core") == 0
+    seen = record_envs(build, machine, monkeypatch)
+    monkeypatch.setattr(build.shutil, "which", lambda name, *a, **k: "/usr/bin/cargo")
+    assert install(build, root, prefix, "--groups", "app", "--deps", str(deps)) == 0
+    assert [c[1:4] for c, _ in seen] == [["run", "1.99.1", "cargo"]], "the locked toolchain, not the PATH one, and nothing else installed"
+
+
+def test_groups_app_alone_without_any_cargo_stops_naming_it_and_check_only_reports(build, tmp_path, machine, monkeypatch, capsys):
+    root, deps = app_tool_repo(build, tmp_path)
+    monkeypatch.setattr(build.shutil, "which", lambda name, *a, **k: None)
+    assert install(build, root, tmp_path / "sdk", "--groups", "app", "--deps", str(deps), "--check") == 1
+    assert "tool 1.0.0" in capsys.readouterr().out and machine.commands == []
+    assert install(build, root, tmp_path / "sdk", "--groups", "app", "--deps", str(deps)) == 1
+    assert "tool needs a cargo" in capsys.readouterr().err and machine.commands == []
+
+
+def test_groups_app_alone_installs_a_cargo_row_with_the_path_cargo(build, tmp_path, machine, monkeypatch):
+    root = sdk_repo(build, tmp_path, good_rows() + ["app cargo-thing 0.3.0 any - -"], '[sdk]\ninstall = ["core"]\ngroups = ["core", "app"]\n')
+    seen = record_envs(build, machine, monkeypatch)
+    monkeypatch.setattr(build.shutil, "which", lambda name, *a, **k: "/usr/bin/cargo")
+    assert install(build, root, tmp_path / "sdk", "--groups", "app") == 0
+    assert [c for c, _ in seen] == [["/usr/bin/cargo", "install", "cargo-thing", "--version", "0.3.0", "--locked"]]

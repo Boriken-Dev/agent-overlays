@@ -3759,6 +3759,8 @@ class Installer:
         init = [i for i in self.rows("rustup-init")]
         toolchains = self.rows("rust")
         if not toolchains:
+            # Only cargo tools are asked for: no rustup and no toolchain row is installed for them.
+            self.cargo_tools(self.installed_toolchain())
             return
         if len(init) != 1:
             raise Problem(f"the lock needs one rustup-init row for {self.plat}, it has {len(init)}")
@@ -3801,10 +3803,34 @@ class Installer:
             if not out.startswith(f"{numeric[0]}-{self.triple}"):
                 run_tool([str(self.rustup), "default", f"{numeric[0]}-{self.triple}"], self.tool_env)
         self.rust_targets(numeric, targets)
+        self.cargo_tools(numeric[0] if numeric else None)
+
+    def installed_toolchain(self) -> str | None:
+        """The numeric toolchain the lock names (any group) that this prefix's rustup already has, else None."""
+        if not self.rustup.is_file():
+            return None
+        code, out = capture_tool([str(self.rustup), "toolchain", "list"], self.tool_env)
+        if code:
+            return None
+        names = [i.version for i in self.items if i.name == "rust" and i.group != "system" and re.match(r"^\d+\.\d+\.\d+$", i.version)]
+        return next((v for v in names if any(row.startswith(f"{v}-{self.triple}") for row in out.splitlines())), None)
+
+    def cargo_command(self, stable: str | None, what: str) -> tuple[list[str], dict[str, str]]:
+        """What runs cargo for a tool: the locked toolchain under the prefix's rustup, else the cargo on PATH."""
+        if stable:
+            return [str(self.rustup), "run", stable, "cargo"], self.tool_env
+        found = shutil.which("cargo")
+        if found is None:
+            raise Problem(f"{what} needs a cargo: install a rust row of the lock (`--groups` naming its group) or put cargo on PATH")
+        # The tool lands in the prefix's cargo home; RUSTUP_HOME stays the caller's so a rustup shim finds its toolchains.
+        return [found], {**os.environ, "CARGO_HOME": str(self.cargo_home)}
+
+    def cargo_tools(self, stable: str | None) -> None:
+        """The `cargo-*` rows and each item vendor's tool of the chosen groups."""
         vendored = {split_item(v.item) for v in vendors_of(self.ctx) if v.item}
         for tool in [i for i in self.items if i.name.startswith("cargo-") and i.group in self.groups and (i.group, i.name) not in vendored]:
-            self.cargo_tool(tool, numeric[0] if numeric else None)
-        self.vendored_tools(numeric[0] if numeric else None)
+            self.cargo_tool(tool, stable)
+        self.vendored_tools(stable)
         self.paths.append(str(self.cargo_home / "bin"))
 
     def rust_targets(self, toolchains: list[str], targets: list[str]) -> None:
@@ -3846,13 +3872,9 @@ class Installer:
             if self.check:
                 self.need(label, f"missing, cargo would build it from {vendor.folder}/ offline")
                 continue
-            if stable is None:
-                raise Problem(f"{name} needs a stable rust row to be installed with")
+            cargo, env = self.cargo_command(stable, name)
             info = use_vendor(self.ctx, deps, vendor, None, self.prefix / "vendor" / vendor.folder)
-            run_tool(
-                [str(self.rustup), "run", stable, "cargo", "--config", info["config"], "install", "--offline", "--locked", name, "--version", row.version],
-                self.tool_env,
-            )
+            run_tool([*cargo, "--config", info["config"], "install", "--offline", "--locked", name, "--version", row.version], env)
             self.report(label, "installed")
 
     def cargo_tool(self, tool: Item, stable: str | None) -> None:
@@ -3864,9 +3886,8 @@ class Installer:
         elif self.check:
             self.need(label, "missing, cargo would compile it")
         else:
-            if stable is None:
-                raise Problem(f"{tool.name} needs a stable rust row to be installed with")
-            run_tool([str(self.rustup), "run", stable, "cargo", "install", tool.name, "--version", tool.version, "--locked"], self.tool_env)
+            cargo, env = self.cargo_command(stable, tool.name)
+            run_tool([*cargo, "install", tool.name, "--version", tool.version, "--locked"], env)
             self.report(label, "installed")
 
     # clang for ring on Windows ARM64
