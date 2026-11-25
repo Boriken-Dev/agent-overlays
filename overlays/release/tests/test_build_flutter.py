@@ -565,3 +565,106 @@ def test_an_sdk_lock_row_is_six_fields(build):
     assert items == [build.Item(3, "core", "rust", "1.89.0", "any", "-", "-")]
     with pytest.raises(build.Problem, match="sdk.lock:1: expected 6 fields, found 2"):
         build.parse_lock_items("core rust\n")
+
+
+# --- offline plan for git checkouts, offline env and offline run -------------------------------------------------------
+
+
+def package_url_hash(url: str) -> str:
+    import hashlib
+
+    return hashlib.sha1(url.encode()).hexdigest()
+
+
+def test_the_listing_names_each_folder_that_holds_a_pubspec(build, tmp_path):
+    checkout = tmp_path / "checkout"
+    for folder in ("bindings/dart/a", "bindings/dart/b", "."):
+        (checkout / folder).mkdir(parents=True, exist_ok=True)
+        (checkout / folder / "pubspec.yaml").write_text("name: x\n", encoding="utf-8")
+    (checkout / ".git").mkdir()
+    (checkout / ".git" / "pubspec.yaml").write_text("not a package\n", encoding="utf-8")
+    (checkout / "docs").mkdir()
+    assert build.pub_packages_listing(checkout) == ".\nbindings/dart/a\nbindings/dart/b"
+    assert build.pub_packages_listing(tmp_path / "empty") == ""
+
+
+def test_offline_plan_lists_the_checkouts_packages_and_seeds_the_bare_repository(build, app, tmp_path, capsys):
+    import subprocess
+
+    root, cache, deps = app
+    sync(build, root, cache, deps)
+    capsys.readouterr()
+    code, result = plan(build, root, deps, cache, capsys, "--out", str(tmp_path / "home"))
+    assert code == 0
+    target = Path(result["cache"])
+    listing = target / "git" / GIT_KEY / ".git" / "pub-packages"
+    assert listing.read_text() == "pkg/inner"
+    bare = target / "git" / "cache" / f"gitpkg-{package_url_hash('https://example.test/org/gitpkg.git')}"
+    rev = "1" * 40
+    empty = subprocess.run(["git", "-C", str(bare), "rev-list", "-1", rev], capture_output=True, text=True)
+    assert empty.returncode == 0 and len(empty.stdout.strip()) == 40, "the locked revision resolves, to an empty commit"
+    tree = subprocess.run(["git", "-C", str(bare), "ls-tree", "-r", empty.stdout.strip()], capture_output=True, text=True)
+    assert tree.stdout == ""
+    # An older plan left an empty list: it is replaced, and the repository is left as it is.
+    listing.write_bytes(b"")
+    marker = bare / "keep"
+    marker.write_text("x", encoding="utf-8")
+    code, _ = plan(build, root, deps, cache, capsys, "--out", str(tmp_path / "home"))
+    assert code == 0 and listing.read_text() == "pkg/inner" and marker.is_file()
+
+
+@pytest.fixture
+def offline_args(build, app, tmp_path, capsys, monkeypatch):
+    for key in ("FLUTTER_STORAGE_BASE_URL", "PUB_CACHE", "CARGO_HOME"):
+        monkeypatch.delenv(key, raising=False)
+    root, cache, deps = app
+    sync(build, root, cache, deps)
+    capsys.readouterr()
+    return root, ["--deps", str(deps), "--pub-cache", str(cache), "--out", str(tmp_path / "home")]
+
+
+def test_offline_env_prints_what_an_offline_build_runs_under(build, app, offline_args, capsys, monkeypatch):
+    root, flags = offline_args
+    assert build.main(["--root", str(root), "offline", "env", "--json", *flags]) == 0
+    env = json.loads(capsys.readouterr().out)
+    assert Path(env["PUB_CACHE"]) == root / "target" / "offline-pub-cache" and env["cache"] == env["PUB_CACHE"]
+    assert env["CARGO_HOME"].endswith("cargo-home") and env["cargo_home"] == env["CARGO_HOME"]
+    assert (env["CARGO_NET_OFFLINE"], env["FLUTTER_SUPPRESS_ANALYTICS"], env["DART_SUPPRESS_ANALYTICS"]) == ("true", "true", "true")
+    assert env["FLUTTER_STORAGE_BASE_URL"] == "http://127.0.0.1:9"
+    monkeypatch.setenv("FLUTTER_STORAGE_BASE_URL", "http://127.0.0.1:4321")
+    assert build.main(["--root", str(root), "offline", "env", *flags]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "FLUTTER_STORAGE_BASE_URL=http://127.0.0.1:4321" in lines and "CARGO_NET_OFFLINE=true" in lines
+
+
+def test_the_offline_settings_add_and_remove_variables_and_the_storage_url_can_be_empty(build, app, offline_args, capsys):
+    root, flags = offline_args
+    ctx_for(build, root, CFG + '[offline]\nstorage_url = ""\n[offline.env]\nEXTRA = "1"\nDART_SUPPRESS_ANALYTICS = ""\n')
+    assert build.main(["--root", str(root), "offline", "env", "--json", *flags]) == 0
+    env = json.loads(capsys.readouterr().out)
+    assert env["EXTRA"] == "1" and "DART_SUPPRESS_ANALYTICS" not in env and "FLUTTER_STORAGE_BASE_URL" not in env
+    assert env["FLUTTER_SUPPRESS_ANALYTICS"] == "true"
+
+
+def test_offline_run_runs_the_command_under_those_variables_and_exits_with_its_code(build, app, offline_args, monkeypatch):
+    import sys
+
+    root, flags = offline_args
+    probe = "import os,sys; sys.exit(0 if os.environ['CARGO_NET_OFFLINE']=='true' and os.environ['PUB_CACHE'] else 3)"
+    assert build.main(["--root", str(root), "offline", "run", *flags, "--", sys.executable, "-c", probe]) == 0
+    code = build.main(["--root", str(root), "offline", "run", *flags, "--", sys.executable, "-c", "import sys; sys.exit(7)"])
+    assert code == 7
+    assert build.main(["--root", str(root), "offline", "run", *flags, "--", sys.executable, "-c", "import sys; sys.exit(len(sys.argv))", "--a", "--b"]) == 3
+
+
+def test_offline_run_runs_nothing_when_offline_is_not_possible(build, app, offline_args, tmp_path, capsys):
+    import sys
+
+    root, flags = offline_args
+    ran = tmp_path / "ran"
+    command = [sys.executable, "-c", f"open({str(ran)!r}, 'w').close()"]
+    nowhere = ["--deps", str(tmp_path / "nowhere"), *flags[2:]]
+    assert build.main(["--root", str(root), "offline", "run", *nowhere, "--", *command]) == 1
+    assert "offline is not possible: no deps checkout" in capsys.readouterr().err and not ran.exists()
+    assert build.main(["--root", str(root), "offline", "env", *nowhere]) == 1
+    assert "offline is not possible" in capsys.readouterr().err

@@ -12,7 +12,7 @@ configuration leaves out is off. Standard library only, Python 3.11.0 or later.
     build.py deps ...             the deps branch: crates, pub packages and CDN files
     build.py scan ...             refuse archives, executables, keys and opaque binaries
     build.py sdk ...              the SDK lock: lint, agree with the repository, install
-    build.py offline plan         what an offline build of the repository needs, as JSON
+    build.py offline plan|env|run what an offline build needs, the environment for it, a command run under it
     build.py release ...          release binaries, a universal macOS binary, container images
     build.py container ...        build or test in a container from the deps branch, with .env overrides
     build.py flutter ...          plugin junctions and the pinned Flutter checkout
@@ -2287,7 +2287,15 @@ SCHEMA["offline"] = Key(
     "table",
     None,
     "`offline plan`.",
-    {"cache_dir": Key("str", "target/offline-pub-cache", "Where the pub cache an offline build uses is seeded, relative to the repository.")},
+    {
+        "cache_dir": Key("str", "target/offline-pub-cache", "Where the pub cache an offline build uses is seeded, relative to the repository."),
+        "storage_url": Key(
+            "str",
+            "http://127.0.0.1:9",
+            "FLUTTER_STORAGE_BASE_URL for `offline env` and `offline run`, unless the process sets it: an address nothing answers, so a build that reaches for Google's storage fails. Empty: not set.",
+        ),
+        "env": Key("map", {}, "Variables `offline env` and `offline run` add after the defaults; an empty value removes the variable."),
+    },
 )
 
 
@@ -2589,6 +2597,50 @@ def seed(source: Path, target: Path) -> None:
         shutil.copyfile(source, target)
 
 
+def pub_packages_listing(checkout: Path) -> str:
+    """What pub reads from `.git/pub-packages` of a git checkout: each folder holding a pubspec.yaml, relative to it."""
+    folders = {
+        "." if (rel := pubspec.parent.relative_to(checkout).as_posix()) == "" else rel
+        for pubspec in checkout.rglob("pubspec.yaml")
+        if ".git" not in pubspec.relative_to(checkout).parts
+    }
+    return "\n".join(sorted(folders))
+
+
+BARE_IDENTITY = {
+    "GIT_AUTHOR_NAME": "build.py", "GIT_AUTHOR_EMAIL": "build.py@localhost",
+    "GIT_COMMITTER_NAME": "build.py", "GIT_COMMITTER_EMAIL": "build.py@localhost",
+}  # fmt: skip
+
+
+def seed_bare(cache: Path, package: Package) -> None:
+    """The bare repository pub looks for in `git/cache/REPO-SHA1`, where the locked revision resolves to an empty commit.
+
+    Pub asks that repository whether the revision exists before it reads the checkout; `refs/replace/REV` makes it
+    answer yes with no history, no objects of the real repository and no network. An existing repository is kept.
+    """
+    bare = cache / "git" / "cache" / f"{package.repo}-{hashlib.sha1(package.url.encode()).hexdigest()}"
+    rev = package.resolved_ref
+    env = {**os.environ, **BARE_IDENTITY}
+
+    def git_here(*args: str, data: bytes | None = None) -> str:
+        done = subprocess.run(["git", "-C", str(bare), *args], input=data, capture_output=True, env=env)
+        if done.returncode:
+            raise Problem(f"git {args[0]} in {bare}: {done.stderr.decode(errors='replace').strip()}")
+        return done.stdout.decode().strip()
+
+    if not bare.is_dir():
+        bare.parent.mkdir(parents=True, exist_ok=True)
+        done = subprocess.run(["git", "init", "--bare", "-q", str(bare)], capture_output=True, env=env)
+        if done.returncode:
+            raise Problem(f"git init --bare {bare}: {done.stderr.decode(errors='replace').strip()}")
+    if subprocess.run(["git", "-C", str(bare), "rev-parse", "-q", "--verify", f"refs/replace/{rev}"], capture_output=True, env=env).returncode == 0:
+        return
+    tree = git_here("hash-object", "-t", "tree", "-w", "--stdin", data=b"")
+    commit = git_here("commit-tree", tree, "-m", "build.py: stands in for a revision the checkout holds", data=b"")
+    git_here("update-ref", f"refs/replace/{rev}", commit)
+
+
 def offline_plan(
     ctx: Ctx, deps: Path | None, user_cache: Path, cargo_lock: Path | None, pubspec_lock: Path | None, cargo_out: Path | None = None,
     vendor: Vendor | None = None,
@@ -2650,10 +2702,11 @@ def offline_plan(
             if cfg.git == "checkout":
                 destination = target / "git" / p.key
                 seed(deps / "pub" / "git" / p.key, destination)
-                # Pub takes a git package from its checkout once the checkout has .git/pub-packages,
-                # which pub fills in itself; git cannot carry a .git path, so the branch has none.
+                # Pub takes a git package from its checkout once the checkout has .git/pub-packages and its
+                # bare repository resolves the revision; git cannot carry a .git path, so the branch has neither.
                 (destination / ".git").mkdir(exist_ok=True)
-                (destination / ".git" / "pub-packages").touch()
+                (destination / ".git" / "pub-packages").write_bytes(pub_packages_listing(destination).encode("utf-8"))
+                seed_bare(target, p)
             else:
                 seed(user_cache / "git" / p.key, target / "git" / p.key)
                 for bare in (user_cache / "git" / "cache").glob(f"{p.repo}-*"):
@@ -2662,7 +2715,7 @@ def offline_plan(
     return plan
 
 
-def offline_command(ctx: Ctx, args: argparse.Namespace) -> int:
+def make_plan(ctx: Ctx, args: argparse.Namespace) -> dict:
     vendor = chosen_vendors(ctx, args, False)[0]
     override = lock_overrides(ctx, args).get(vendor.folder)
     cargo_lock = override or (ctx.root / vendor.lock if vendor.lock else None)
@@ -2677,6 +2730,11 @@ def offline_command(ctx: Ctx, args: argparse.Namespace) -> int:
     plan = offline_plan(ctx, deps, user_cache, cargo_lock, pubspec_lock_of(ctx), args.out, vendor)
     if deps is None:
         plan["reason"] = reason
+    return plan
+
+
+def offline_command(ctx: Ctx, args: argparse.Namespace) -> int:
+    plan = make_plan(ctx, args)
     if args.json:
         print(json.dumps(plan, indent=2))
     else:
@@ -2687,18 +2745,83 @@ def offline_command(ctx: Ctx, args: argparse.Namespace) -> int:
     return 0 if not plan["reason"] else 1
 
 
+def offline_environment(ctx: Ctx, plan: dict) -> dict[str, str | None]:
+    """The variables an offline build runs under (None: removed): the seeded caches, no network, no telemetry.
+
+    FLUTTER_STORAGE_BASE_URL keeps the process's own value, else `[offline] storage_url`; `[offline] env` has the last word.
+    """
+    cfg = ctx.cfg.offline
+    env: dict[str, str | None] = {}
+    if plan["cache"]:
+        env["PUB_CACHE"] = plan["cache"]
+    if plan["cargo_home"]:
+        env["CARGO_HOME"] = plan["cargo_home"]
+    env["CARGO_NET_OFFLINE"] = "true"
+    env["FLUTTER_SUPPRESS_ANALYTICS"] = "true"
+    env["DART_SUPPRESS_ANALYTICS"] = "true"
+    if os.environ.get("FLUTTER_STORAGE_BASE_URL"):
+        env["FLUTTER_STORAGE_BASE_URL"] = os.environ["FLUTTER_STORAGE_BASE_URL"]
+    elif cfg.storage_url:
+        env["FLUTTER_STORAGE_BASE_URL"] = cfg.storage_url
+    for key, value in cfg.env.items():
+        env[key] = value or None
+    return env
+
+
+def offline_env_command(ctx: Ctx, args: argparse.Namespace) -> int:
+    plan = make_plan(ctx, args)
+    if plan["reason"]:
+        raise Problem(f"offline is not possible: {plan['reason']}")
+    env = {k: v for k, v in offline_environment(ctx, plan).items() if v is not None}
+    if args.json:
+        print(json.dumps({**env, "cache": plan["cache"], "cargo_home": plan["cargo_home"]}, indent=2))
+    else:
+        for key, value in env.items():
+            print(f"{key}={value}")
+    return 0
+
+
+def offline_run_command(ctx: Ctx, args: argparse.Namespace) -> int:
+    command = list(args.cmd)
+    if command[:1] == ["--"]:
+        command = command[1:]
+    if not command:
+        raise Usage("name the command after --: offline run -- COMMAND ...")
+    plan = make_plan(ctx, args)
+    if plan["reason"]:
+        raise Problem(f"offline is not possible: {plan['reason']}")
+    env = dict(os.environ)
+    for key, value in offline_environment(ctx, plan).items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
+    program = shutil.which(command[0], path=env.get("PATH")) or command[0]
+    try:
+        return subprocess.run([program, *command[1:]], env=env).returncode
+    except OSError as error:
+        raise Problem(f"{command[0]}: {error}") from error
+
+
 def add_offline(sub: argparse._SubParsersAction) -> None:
-    parser = sub.add_parser("offline", help="what an offline build of the repository needs")
+    parser = sub.add_parser("offline", help="what an offline build of the repository needs, and running one")
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
-    plan = commands.add_parser("plan", help="seed the pub cache and write the cargo home from the deps checkout, or say why not")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--deps", type=Path, metavar="DIR", help="the deps checkout (default: `deps path`)")
+    common.add_argument("--vendor", metavar="FOLDER", help="the [[deps.vendor]] folder whose cargo home is written (default: the first)")
+    common.add_argument("--cargo-lock", type=Path, metavar="FILE", help="read this Cargo.lock instead of the repository's")
+    common.add_argument("--pubspec-lock", type=Path, metavar="FILE", help="read this pubspec.lock instead of [deps.pub] lock")
+    common.add_argument("--pub-cache", type=Path, metavar="DIR", help="the user's pub cache, only read (git packages recorded, not vendored, come from it)")
+    common.add_argument("--out", type=Path, metavar="DIR", help="where the cargo home is written (default: a temp directory named for the lock)")
+    plan = commands.add_parser("plan", parents=[common], help="seed the pub cache and write the cargo home from the deps checkout, or say why not")
     plan.add_argument("--json", action="store_true", help="print {cache, reason, cargo_home} as JSON")
-    plan.add_argument("--deps", type=Path, metavar="DIR", help="the deps checkout (default: `deps path`)")
-    plan.add_argument("--vendor", metavar="FOLDER", help="the [[deps.vendor]] folder whose cargo home is written (default: the first)")
-    plan.add_argument("--cargo-lock", type=Path, metavar="FILE", help="read this Cargo.lock instead of the repository's")
-    plan.add_argument("--pubspec-lock", type=Path, metavar="FILE", help="read this pubspec.lock instead of [deps.pub] lock")
-    plan.add_argument("--pub-cache", type=Path, metavar="DIR", help="the user's pub cache, only read (git packages recorded, not vendored, come from it)")
-    plan.add_argument("--out", type=Path, metavar="DIR", help="where the cargo home is written (default: a temp directory named for the lock)")
     plan.set_defaults(run=offline_command)
+    env = commands.add_parser("env", parents=[common], help="run the plan, then print the variables an offline build runs under")
+    env.add_argument("--json", action="store_true", help="print them as a JSON object, with cache and cargo_home")
+    env.set_defaults(run=offline_env_command)
+    run = commands.add_parser("run", parents=[common], help="run the plan, then a command under those variables (exit 1 and nothing run when offline is not possible)")
+    run.add_argument("cmd", nargs=argparse.REMAINDER, metavar="-- COMMAND", help="the command and its arguments")
+    run.set_defaults(run=offline_run_command)
 
 
 # --- flutter: plugin junctions and the pinned checkout ---------------------------------------------------------
