@@ -1,6 +1,6 @@
 # Flow: Plan Execution
 
-Execute only plans with `Status: ready` or `executing`; set `executing` at start.
+Execute only plans with status `ready` or `executing`; `plans start` sets `executing`.
 Do not re-plan, second-guess recorded decisions, or silently downgrade required work.
 
 ## Load Once
@@ -17,8 +17,8 @@ Do not re-plan, second-guess recorded decisions, or silently downgrade required 
    `plans next <name>` gives what the current step needs. For a sub-plan,
    read its parent first and the assigned sub-plan only; update both when a phase
    changes. **Reconcile before continuing**: fix Progress that disagrees with the
-   working tree or git history, and move any `done` plan not yet under
-   `plans/completed/` via `plans status <name> done -m "<evidence>"`.
+   working tree or git history, and close any finished plan still open with
+   `plans status <name> done -m "<evidence>"`.
 5. **Check for another executor in this tree** before editing, and check your base
    if you are in a worktree: `$ENGINEERING_OVERLAY_ROOT/flows/PARALLEL.md`, which
    also covers fanning out, integrating and removing worktrees.
@@ -73,5 +73,4 @@ public-facing text runs `leak-check <repo>`
 Reconcile Progress with the working tree: existing code cannot remain `[ ]`; mark it
 done, active with `uncommitted: <files>`, or blocked. Report changed files,
 evidence, unverified items, dirty state and the resolved provider/model/settings.
-Only when no blocker remains: `plans status <name> done -m "<evidence>"`,
-which sets `Status: done` and moves the plan to `.agents/plans/completed/`.
+Only when no blocker remains: `plans status <name> done -m "<evidence>"`.

@@ -5,11 +5,6 @@ a task needs an expensive model. Plans name a role/subrole, never a raw provider
 model ID; the executor resolves the role against the providers and surfaces
 available in the current run.
 
-Last reviewed: 2026-07-16. Provider catalogs and entitlements move; refresh this
-file when a provider changes its picker. Provider documentation (References) is the
-source of truth for names and knobs; the field reports behind these heuristics are
-anecdotal.
-
 ## Provider Surfaces
 
 | Provider | User surface | Default route |
@@ -90,4 +85,3 @@ explicit approval. Escalate by blast radius and recovery cost, not prestige or p
 - OpenAI models and settings: <https://developers.openai.com/api/docs/models>
 - Anthropic models and effort: <https://platform.claude.com/docs/en/build-with-claude/effort>
 - Google Gemini models and thinking: <https://ai.google.dev/gemini-api/docs/gemini-3>
-- Field report and companion config: <https://www.reddit.com/r/codex/comments/1utzi5w/gpt56_sol_vs_terra_vs_luna_my_early_guide_to/>, <https://github.com/nsEytgXm/subagents_configs>

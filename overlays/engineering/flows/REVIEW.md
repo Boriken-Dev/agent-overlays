@@ -2,13 +2,15 @@
 
 Peer architect models cross-review a plan before execution. One **main** architect
 owns the plan; each **reviewer** owns one report file. All communication is through
-files, never a shared conversation. The plan is `Status: review` while this runs.
+files, never a shared conversation. The plan has status `review` while this runs
+(`plans status <name> review`).
 
 ## Files
-- Plan: `.agents/plans/review/<name>.md` (or `<name>/README.md`); only main edits it.
-- Reports: `.agents/plans/review/<name>/reviews/<reviewer-id>.md` (e.g. `gemini.md`). The
-  reviewer creates it; main and reviewer both append; nothing is rewritten or
-  deleted, so the thread is the audit trail.
+- Plan: only main edits it (`plans edit`).
+- Reports: one file per reviewer, `<reviewer-id>.md` (e.g. `gemini.md`), in the
+  `reviews/` folder of the complex plan (`plans add --complex`). The reviewer creates
+  it; main and reviewer both append; nothing is rewritten or deleted, so the thread
+  is the audit trail.
 
 ## Protocol (default cap: 2 rounds; main is final authority)
 1. **Reviewer, round N**: append `## R<N> — findings`, one line per finding:
@@ -23,7 +25,7 @@ files, never a shared conversation. The plan is `Status: review` while this runs
    plus new findings *only on sections that changed*.
 4. **Termination**: when a round adds no new `blocker`, or at the round cap. Main
    resolves anything still open, records DEFERRED items in the plan (Known Facts or
-   a `## Deferred` section) so nothing silently disappears, and sets `Status: ready`.
+   a `## Deferred` section) so nothing silently disappears, and sets status `ready`.
 
 ## Severity
 - `blocker`: executing as written produces wrong or broken results.

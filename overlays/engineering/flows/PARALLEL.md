@@ -1,9 +1,5 @@
 # Flow: Parallel Work
 
-Several agents on one repository at once. The failures are quiet: an agent does
-competent work against the wrong tree, nothing warns, and the damage appears at
-integration looking like someone else's mistake.
-
 ## Whether to
 
 - **Reads and research parallelise freely.**
@@ -71,9 +67,6 @@ exists.
 
 ## Cleaning up
 
-A leftover worktree is a plausible-looking tree at the wrong base; whoever opens it
-later gets confident, wrong answers.
-
 - **Every worktree ends integrated and removed, or reported as left behind** with
   what it holds and why.
 - `git worktree list` shows them all; `git worktree prune` removes only those whose
@@ -81,5 +74,4 @@ later gets confident, wrong answers.
 - A clean, integrated worktree: `git worktree remove <path>`, then delete its branch.
 - **A dirty worktree is read before it is removed**: its changes are unfinished work
   or an integration that never happened. Never force-remove one to shorten the list.
-- Clean up at the end of the run that created them; later, nobody knows what they
-  were for.
+- Clean up at the end of the run that created them.

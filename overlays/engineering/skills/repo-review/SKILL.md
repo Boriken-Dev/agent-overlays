@@ -20,14 +20,13 @@ record**. It changes no code. Plans come afterwards, only when asked.
 ## Tools
 
 Use the engineering overlay's skills and scripts (each `duho` skill script also serves
-MCP when launched with `<NAME>_MCP=stdio`): a review records many findings, and
-querying or updating via the structured CLI/MCP tools keeps frontmatter and status
-folders consistent.
+MCP when launched with `<NAME>_MCP=stdio`): a review records many findings; use
+the tools, never edit records by hand.
 
 | Skill / Script | Command line | For |
 | --- | --- | --- |
-| `records` (`findings`) | `records query findings --where "status = 'active'"` / `records list findings` | what is already known |
-| `records` (`findings`) | `records add findings <slug> --attr severity=high --attr lens=soundness --body-file <file>` | recording a finding |
+| `dotagents findings` | `dotagents findings query --where "status = 'active'"` | what is already known |
+| `dotagents findings` | `dotagents findings add <slug> --attr severity=high --attr lens=soundness --body-file <file>` | recording a finding |
 | `plans` | `plans list` / `plans query --where "status != 'done'"` | live plans, so nothing planned is re-raised |
 | `plans` | `plans add <name> -t ... -p ...` / `plans validate <name>` | writing plans, when asked |
 | `decisions` | `decisions list` / `decisions query` | recorded architectural decisions |
@@ -156,7 +155,7 @@ Nothing is recorded on one reading.
 Use the project's own way, found in this order:
 
 1. what its `AGENTS.md` says;
-2. its findings folder (`<project>/.agents/findings/`): `records add findings <slug> --attr description="<line>" --attr severity=<sev> --attr lens=<lens> --body-file <file>`;
+2. the project's findings queue: `dotagents findings add <slug> --attr description="<line>" --attr severity=<sev> --attr lens=<lens> --body-file <file>`;
 3. the host's issue tracker, only when the `issues` argument was given or the
    project's notes say so: show the list first, get a yes, then create them. A
    security finding, and anything that names private material, stays in the private
@@ -192,7 +191,7 @@ options and what each costs.
 
 ### The review record
 
-One file, `<project>/.agents/reviews/<date>_<short sha>.md`:
+One record, `records add reviews <date>_<short sha> --body-file <file>`:
 
 - the goals as understood, and the commit, version and runtimes reviewed;
 - baseline results;
@@ -205,7 +204,7 @@ One file, `<project>/.agents/reviews/<date>_<short sha>.md`:
 - what was not reviewed, and why.
 
 A pattern that no standard covers, or a standard that turned out wrong, is recorded
-against the user-level findings store (`records add findings <slug> -g ...`), not the project.
+against the user-level findings queue (`dotagents findings add -g <slug> ...`), not the project.
 
 ## 6. Report
 
@@ -215,8 +214,8 @@ Offer plans; do not write them unasked.
 
 ## Plans
 
-Only when asked. Follow `$ENGINEERING_OVERLAY_ROOT/flows/PLAN.md`, starting from its
-template.
+Only when asked. Follow `$ENGINEERING_OVERLAY_ROOT/flows/PLAN.md`, making each with
+`plans add`.
 
 - **Every finding lands somewhere**: in exactly one plan, or in a list of findings
   deliberately declined or deferred, each with its reason. The mapping is a table in
@@ -229,7 +228,7 @@ template.
 - A fix that breaks the documented API says so, with the version it implies.
 - `[decision]` items are not planned around. They are put to the owner, and the
   plans that depend on them say which answer they assume.
-- Plans are `Status: draft` until the owner approves them.
+- Plans stay `draft` until the owner approves them.
 - A finding is closed with what was done and the evidence, by the plan that fixes
   it, never by the review. A correctness or security finding closes only with a
   test that fails before the fix and covers the class of input, and a resolution

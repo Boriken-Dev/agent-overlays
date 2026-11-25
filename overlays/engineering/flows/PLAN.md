@@ -11,15 +11,13 @@ deviation triggers, and never defer a question to execution.
 2. **No implementation**: paths, signatures, hints, a one-line *Why*, and code
    blocks of at most five lines. Commands are complete literals, environment setup
    included; verify undocumented third-party behaviour against the real system.
-3. **Required shape**: YAML frontmatter (`executor`, plus optional attributes like
-   `priority`, `tags`, `links`, `depends_on`; never `name`, `status` or `title`: the
-   file name is the name, the folder the status, the `# ` heading the title), followed by
+3. **Required shape**: `plans add` makes it: an `executor` attribute (optional
+   `priority`, `tags`, `links`, `depends_on`, set with `plans set`), then
    `# <Title>`, `## Progress`, `## Known Facts & Context`, `## Phases` (files,
    guidance, Why, observable done-when), `## Verification`, `## Reporting`.
 4. **Right-sized**: split above ~150 lines or for independently executable phases
-   using a complex plan directory (`--complex`): `plans/<status>/<name>/README.md`
-   for the overall plan and `<phase|extra>.md` beside it. Executors read `README.md`
-   and their assigned phase file.
+   with `plans add --complex`: one overall plan and a file per phase or extra.
+   Executors read the overall plan and their assigned phase.
 5. **Evidence**: performance baselines before claims, registry metadata before new
    dependencies, per-item consent for bundled approvals. A plan that breaks a
    documented API names its known consumers (dependents, sibling repos), and its
@@ -27,36 +25,24 @@ deviation triggers, and never defer a question to execution.
 
 ## Writing one
 
-Start with `plans add <name> -t "<title>" -p "<phase>" ...`: it writes
-`$ENGINEERING_OVERLAY_ROOT/references/plan_template.md` into `plans/draft/`
-(or `plans/draft/<name>/README.md` with `--complex`). `plans validate
-<name>` must pass before the plan is set `ready`.
+Run `plans add <name> -t "<title>" -p "<phase>" ...` (add `--complex` for a split
+plan), then fill it with `plans edit`. `plans validate <name>` must pass before
+`plans status <name> ready`.
 
 Executor kickoff, given with the plan:
 
 > Read `$ENGINEERING_OVERLAY_ROOT/flows/EXEC.md` and, if present,
-> `$<LANG>_OVERLAY_ROOT/kb/<LANG>.md`. Execute `<path>` precisely; `EXEC.md` resolves
-> its `Executor:` role and provider. Keep `## Progress` live (`[/]` when started,
-> `[x]` when done); record blockers and continue independent work without asking the
-> user.
+> `$<LANG>_OVERLAY_ROOT/kb/<LANG>.md`. Execute plan `<name>` precisely; `EXEC.md`
+> resolves its `Executor:` role and provider. Keep `## Progress` live (`[/]` when
+> started, `[x]` when done); record blockers and continue independent work without
+> asking the user.
 
-## Persistence & Layout
+## Status
 
-Plans live in `<project>/.agents/plans/<status>/`:
-
-- `draft/<name>.md` (`status: draft`)
-- `ready/<name>.md` (`status: ready`)
-- `review/<name>.md` (`status: review`)
-- `executing/<name>.md` (`status: executing`)
-- `on-hold/<name>.md` (`status: on-hold`)
-- `completed/<name>.md` (`status: done`)
-
-Complex plans replace `<name>.md` with a directory `<name>/README.md` +
-`<phases|extras>.md`. No `INDEX.md` is kept. `plans status <name> <status>`
-moves the file or directory into its folder, which is the status
-(`done` requires every phase checked and `-m` evidence; `on-hold` requires `-m`
-reason). Other storage backends (`github`, `gitlab`, `jira`, `ai6`) can be wired
-via `.agents/records.toml` (`plans providers`).
+Statuses: `draft`, `ready`, `review`, `executing`, `on-hold`, `done`.
+`plans status <name> <status>` changes it (`done` requires every phase checked and
+`-m` evidence; `on-hold` requires `-m` reason). `plans providers` lists the other
+storage backends (`github`, `gitlab`, `jira`, `ai6`).
 
 ## Query, edit and remove
 
@@ -64,14 +50,14 @@ via `.agents/records.toml` (`plans providers`).
 | --- | --- |
 | what exists | `plans list` / `plans list --where "status = 'ready'"` |
 | SQL search | `plans query "SELECT name, status, done, total, title FROM plans ..."` |
-| what to do now | `plans next <name>`: frontmatter head, progress, current phase |
+| what to do now | `plans next <name>`: attributes, progress, current phase |
 | one part | `plans show <name> --section facts` / `--phase 3` |
 | attributes | `plans set <name> --attr key=val` / `--unset key` |
 | body / section | `plans edit <name> --section facts --append "..."` / `--replace old=new` |
 | a step | `plans start`, `check -m`, `block -m`, `uncheck` |
 | a fact learned | `plans note <name> -m "..."` |
 | remove / migrate | `plans rm <name>` / `plans migrate` |
-| arbitrary folder | `records query|show|add|set|edit|mv|rm <folder>` |
+| other records | `records query|show|add|set|edit|mv|rm <folder>` |
 
 Do not read a whole plan to learn one thing, or rewrite one to change a line.
 
@@ -81,6 +67,6 @@ Do not read a whole plan to learn one thing, or rewrite one to change a line.
 - Known Facts holds discovered context; Verification runs setup before checks.
 - Optional-test skip counts and expected outcomes are stated.
 - No code block exceeds five lines.
-- `executor` in frontmatter names a role present in `MODELS.md`; no raw provider IDs.
+- `executor` names a role present in `MODELS.md`; no raw provider IDs.
 - A rule cited to skip, stub or shrink work is quoted verbatim with `file:line`,
   never paraphrased.

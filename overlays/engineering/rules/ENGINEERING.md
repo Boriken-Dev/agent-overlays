@@ -92,30 +92,12 @@ from the first `## ` heading down is documentation and is not merged.
   one bit ("did it pass?"); `summarize-run -o build.log -- <cmd>` prints a
   verdict and keeps the log on disk. Doing the same manual scan twice? Write the
   script.
-- **Draft follow-ups**: adjacent work found mid-execution gets a `Status: draft` plan
-  (idea + scope + why) in the project's `.agents/plans/`, never executed in the same
-  pass.
-- **Plans**: always `<project>/.agents/plans/<status>/<name>.md` (or
-  `<status>/<name>/README.md` + `<phase|extra>.md` for complex plans), snake_case,
-  with YAML frontmatter for fields/attributes and context after frontmatter (the
-  file name is the name, the folder the status, the `# ` heading the title, so the
-  frontmatter repeats none of them); no
-  `INDEX.md`. Create, query, step, edit and move them with `plans`
-  (`add`, `list`, `query`, `next`, `start`, `check`, `set`, `edit`, `status`, `rm`),
-  or any folder with `records`, as each step happens, not at the end.
-  **`~/.agents/plans/` is never a plan home**: re-home harness drafts into the
-  project and delete the copy.
-- **Decisions**: `<project>/.agents/decisions/<status>/<Dnn_slug>.md` (`proposed`,
-  `decided`, `superseded`) with YAML frontmatter and context after frontmatter (id,
-  name and title come from the file name and heading, status from the folder);
-  no `INDEX.md`. Settled decisions are superseded (`decisions supersede`),
-  never deleted.
-
-## Why these are not in a minimal starter
-
-A minimal starter lays down only the base rules (reading every level's `AGENTS.md`, the permissions
-inside `.agents/`, the findings folder for config misses, the managed-marker contract).
-Everything here is convention on top. Nothing in the base requires the `plans/`
-layout, and `records` works over any folder without a fixed schema, so a user who
-files work differently need not fight their config. `Releases` is always-on rather
-than behind a flow file because a release is irreversible; opt in deliberately.
+- **Draft follow-ups**: adjacent work found mid-execution gets a `draft` plan
+  (idea + scope + why) made with `plans add`, never executed in the same pass.
+- **Plans**: create, query, step, edit and move them with `plans` (`add`, `list`,
+  `query`, `next`, `start`, `check`, `set`, `edit`, `status`, `rm`) as each step
+  happens, not at the end; other record folders with `records`. Never edit their
+  files by hand. Plans belong to the project: re-home a harness draft made outside
+  it with `plans add` and delete the copy.
+- **Decisions**: manage them with `decisions` (`add`, `list`, `query`, `decide`,
+  `supersede`). Supersede a settled decision, never delete it.
