@@ -82,12 +82,16 @@ commit and the SHA-256 of `Cargo.lock`, and the checks read it.
 - `deps use` writes a cargo home outside the repository that replaces every source by the checkout's `crates/`;
   `--repo-config` also writes `.cargo/config.toml`, `--json` prints the result for a script (one vendor: the first, or
   `--vendor`).
-- The checkout is found by `--deps`, `$BUILD_DEPS`, `[deps] checkout`, else a detached worktree `../REPO-deps`
-  of `origin/deps` that `deps path` adds when it is missing. `deps refresh` needs the worktree on the branch (`deps init`).
+- The checkout is found by `--deps`, then the variables `[deps] checkout_env` lists in order (the first that is set; for a
+  repository whose scripts, build scripts and gates already read another name), `$BUILD_DEPS`, `[deps] checkout`, else a
+  detached worktree `../REPO-deps` of `origin/deps` that `deps path` adds when it is missing. Every command that needs the
+  checkout (`deps`, `offline`, `sdk install --deps`) finds it this way. `deps refresh` needs the worktree on the branch (`deps init`).
 - A mirror of crates.io is `[deps] crates_url` or `$BUILD_CRATES_URL`.
 - `scan [REF...|--all-refs|--tree DIR]` prints what is refused and `PASS|FAIL: N flagged, M paths scanned`. It is strict: a
   file that is not text or a known image or font is flagged, including `wasm`, `pdf`, `sqlite` and unrecognised binaries.
-  `[deps] allow` lets one kind through one path pattern (`"cdn/www.gstatic.com/flutter-canvaskit/*:wasm"`).
+  `[deps] allow` lets one kind through one path pattern (`"cdn/www.gstatic.com/flutter-canvaskit/*:wasm"`). `--tree DIR`
+  skips the top-level `.git` of `DIR`, a directory in a clone and a `gitdir:` pointer file in a linked worktree, which is
+  what `deps path` makes; a `.git` anywhere deeper is still flagged.
   Text that is not UTF-8 (ISO-8859-1, Windows-1252, or UTF-8 with a stray such byte) passes and prints
   `NOTE text, not UTF-8`, as `file` calls it text: no NUL, no control character but tab, LF, FF and CR, and at most 10% of
   its bytes from 0x80 up. A private key in it is still refused; UTF-16 and anything with NULs is still a binary.
