@@ -23,7 +23,7 @@ even when the run failed or waiting was interrupted. Exit 0 only when the run su
 Configuration (the schema is in the engineering overlay's kb/AGENT_TOOLS.md):
     ~/.agents/agent-tools.local.toml   [identity] name, email
     <repo>/.agents/agent-tools.toml    [repo_guard] main, remote, checkout, log, pre_push, forbidden,
-                                       ci_timeout, ci_find_timeout
+                                       ci_timeout, ci_find_timeout, scan_allow
 
 Exit codes: 0 ok, 1 refused or failed, 2 configuration or usage.
 """
@@ -31,6 +31,7 @@ Exit codes: 0 ok, 1 refused or failed, 2 configuration or usage.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import os
 import re
 import shlex
@@ -223,12 +224,75 @@ def leak_check(guard: Guard) -> None:
         raise Refused(f"leak-check: {verdict}")
 
 
+FLAG_HEADER = re.compile(r"^FLAG (.+): (\d+)$")
+FLAG_ROW = re.compile(r"^  ([0-9a-f]{6,64}) +\d+  (.+)$")
+FAIL_LINE = re.compile(r"^FAIL: (\d+) flagged, (\d+) paths scanned$")
+
+
+def _reachable(guard: Guard, ref: str) -> set[tuple[str, str]]:
+    """(object id, path) of every object reachable from REF (or REMOTE/REF), for a ref-scoped allowance."""
+    for name in (ref, f"{guard.remote}/{ref}"):
+        out = run(["git", "-C", guard.repo, "rev-list", "--objects", name], check=False, capture=True)
+        if out.returncode == 0:
+            return {(sha, path) for sha, _, path in (row.partition(" ") for row in out.stdout.splitlines()) if path}
+    return set()
+
+
+def allowed_hits(guard: Guard, scan_output: str) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]:
+    """Split a scan's flagged rows into (allowed, refused) by `[repo_guard] scan_allow`; each row is (kind, id, path).
+
+    An entry names a path glob and may name a `kind`, a `ref` the blob must be reachable from, and a `reason`. A scan that
+    truncated a list (`... N more`) cannot be matched row by row, so nothing in it is allowed.
+    """
+    rows: list[tuple[str, str, str]] = []
+    kind = ""
+    for line in scan_output.splitlines():
+        header, row = FLAG_HEADER.match(line), FLAG_ROW.match(line)
+        if header:
+            kind = header.group(1)
+        elif row:
+            rows.append((kind, row.group(1), row.group(2)))
+    entries = guard.config.get("repo_guard", "scan_allow", [])
+    flagged = FAIL_LINE.match(last_line(scan_output))
+    if not entries or not flagged or int(flagged.group(1)) != len(rows):
+        return [], rows
+    reach: dict[str, set[tuple[str, str]]] = {}
+    allowed, refused = [], []
+    for kind, sha, path in rows:
+        reason = None
+        for entry in entries:
+            if not fnmatch.fnmatchcase(path, entry["path"]) or entry.get("kind", kind) != kind:
+                continue
+            ref = entry.get("ref")
+            if ref:
+                found = reach.setdefault(ref, _reachable(guard, ref))
+                if not any(s.startswith(sha) and p == path for s, p in found):
+                    continue
+            reason = entry.get("reason", "")
+            break
+        if reason is None:
+            refused.append((kind, sha, path))
+        else:
+            allowed.append((kind, sha, path + (f" ({reason})" if reason else "")))
+    return allowed, refused
+
+
 def blob_scan(guard: Guard, *scan_args: Any) -> None:
     out = guard.build("scan", *scan_args, check=False)
     verdict = last_line(out.stdout)
+    if out.returncode == 0 and verdict.startswith("PASS"):
+        print(verdict)
+        return
+    allowed, refused = allowed_hits(guard, out.stdout)
+    for _, _, path in allowed:
+        print(f"allowed: {path}")
+    if allowed and not refused and FAIL_LINE.match(verdict):
+        print(f"PASS: 0 flagged, {len(allowed)} allowed")
+        return
+    for kind, sha, path in refused:
+        print(f"refused {kind}: {sha} {path}")
     print(verdict)
-    if out.returncode != 0 or not verdict.startswith("PASS"):
-        raise Refused(f"scan: {verdict}")
+    raise Refused(f"scan: {verdict}")
 
 
 def fast_forward_checkout(guard: Guard) -> None:

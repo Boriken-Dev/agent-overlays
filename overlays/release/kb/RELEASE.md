@@ -82,7 +82,8 @@ repo-guard ci     [-C DIR] [--ref REF] [--timeout S] [--find-timeout S] [--every
   trailer, a session URL, a "Generated with" footer; a person's co-author line is fine) and commits as the identity.
 - `push` checks every commit above `REMOTE/MAIN` (author and committer are the identity, no forbidden trailer), that HEAD
   fast-forwards `REMOTE/MAIN`, the engineering overlay's `leak-check` script, the repository's `tools/build.py scan --all-refs` and each `pre_push`
-  command; then pushes `HEAD:MAIN` and fast-forwards `[repo_guard] checkout` when set. When `tools/build.cfg` has a `[deps]`
+  command; a blob the scan flags is refused unless `[repo_guard] scan_allow` names it (reported as `allowed: PATH (reason)`;
+  `$ENGINEERING_OVERLAY_ROOT/kb/AGENT_TOOLS.md`); then pushes `HEAD:MAIN` and fast-forwards `[repo_guard] checkout` when set. When `tools/build.cfg` has a `[deps]`
   table and a file it names changed, `deps` follows. The files are each `[[deps.vendor]]` `lock` (`[deps] cargo_lock` when
   no vendor is listed), the `[sdk] lock` (default `tools/sdk.lock`) when a vendor is an `item`, `[deps.pub] lock`, each
   `[[deps.tree]]` `pin` and `[deps.cdn] index`. With nothing to push it still runs the checks.

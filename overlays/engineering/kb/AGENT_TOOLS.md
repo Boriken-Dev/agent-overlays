@@ -34,6 +34,9 @@ pre_push = [["cargo", "fmt", "--check"], "python tools/check.py"]   # extra comm
 forbidden = ["^wip:"]         # extra regular expressions no commit message may match (one per line, case-insensitive)
 ci_timeout = 3600             # seconds `repo-guard ci` waits for the run
 ci_find_timeout = 120         # seconds it waits for the host to start the run
+scan_allow = [                # blobs `repo-guard push`'s scan lets through (see below)
+  { path = "cdn/vendor/*", kind = "wasm", ref = "deps", reason = "approved, offline web build" },
+]
 
 [gate]
 restore = ["app/pubspec.lock"]            # checked out again after the steps
@@ -170,6 +173,16 @@ One rule, used by `repo-guard` and `gate merge` (`lib/python/agent_tools.py`): a
 `Co-Authored-By:` line naming a model or an assistant, any `*-Session:` trailer, a session URL, or a "Generated with"
 footer (with or without the robot emoji). A co-author line naming a person is ordinary and passes. `[repo_guard]
 forbidden` adds patterns.
+
+### `scan_allow`
+
+`repo-guard push` refuses every blob `tools/build.py scan --all-refs` flags. A `[repo_guard] scan_allow` entry lets a
+named blob through when a repository is allowed to carry it: `path` is a glob over the blob's path (`*` crosses `/`),
+`kind` (optional) the kind the scan names (`wasm`, `pdf`, ...), `ref` (optional) a ref the blob must be reachable from at that
+path (`REF`, else `REMOTE/REF`), `reason` the text printed. Each allowed hit prints `allowed: PATH (reason)`; anything
+else is still listed as `refused KIND: ...` and the push stops. A scan that cuts a list short (`... N more`) cannot be
+matched row by row, so none of its hits is allowed. `build.cfg`'s `[deps] allow` is separate: it makes the scan itself
+skip a kind at a path and prints nothing.
 
 ## `leak-check`: the private store
 

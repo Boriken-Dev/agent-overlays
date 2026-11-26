@@ -43,6 +43,7 @@ PROJECT_SCHEMA: dict[str, Any] = {
         "forbidden": [str],
         "ci_timeout": int,
         "ci_find_timeout": int,
+        "scan_allow": [{"path": str, "ref": str, "kind": str, "reason": str}],
     },
     "gate": {"steps": [_STEP], "restore": [str], "wsl_steps": [_WSL_STEP]},
     "merge": {"rules": [_RULE]},

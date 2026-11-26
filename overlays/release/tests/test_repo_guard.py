@@ -418,3 +418,90 @@ def test_a_changed_nested_lock_refreshes_deps(world, tmp_path, capsys):
     commit_file(work, "web/Cargo.lock", "chore: nested lock")
     assert main("push", "-C", work) == 0
     assert "pushed deps" in capsys.readouterr().out
+
+
+# --- scan_allow ---------------------------------------------------------------------------------------------
+
+FLAGGING_SCAN = '''\
+import subprocess, sys
+args = sys.argv[1:]
+root = args[args.index("--root") + 1]
+rows = []
+for line in subprocess.run(["git", "-C", root, "rev-list", "--objects", "--all"], capture_output=True, text=True).stdout.splitlines():
+    sha, _, path = line.partition(" ")
+    if path.endswith(".wasm") or path.endswith(".exe"):
+        rows.append((path.rsplit(".", 1)[1], sha, path))
+for kind in sorted({r[0] for r in rows}):
+    mine = [r for r in rows if r[0] == kind]
+    print(f"FLAG {kind}: {len(mine)}")
+    for _, sha, path in mine:
+        print(f"  {sha[:10]} {10:>10}  {path}")
+print(f"{'FAIL' if rows else 'PASS'}: {len(rows)} flagged, 9 paths scanned")
+sys.exit(1 if rows else 0)
+'''
+
+
+def flagging_world(world, allow):
+    work, bare = world
+    (work / "tools").mkdir(exist_ok=True)
+    (work / "tools" / "build.py").write_text(FLAGGING_SCAN, encoding="utf-8")
+    project_file(work, "[repo_guard]\n" + allow)
+    (work / "cdn").mkdir(exist_ok=True)
+    (work / "cdn" / "a.wasm").write_text("a-wasm\n", encoding="utf-8")
+    (work / "cdn" / "b.exe").write_text("b-exe\n", encoding="utf-8")
+    git(work, "add", "-A", "-f")
+    git(work, "-c", f"user.name={NAME}", "-c", f"user.email={EMAIL}", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "feat: blobs")
+    return work, bare
+
+
+def test_scan_allow_lets_a_named_path_through_and_says_so(world, capsys):
+    allow = '[[repo_guard.scan_allow]]\npath = "cdn/*.wasm"\nreason = "approved wasm"\n'
+    work, bare = flagging_world(world, allow)
+    (work / "cdn" / "b.exe").unlink()
+    git(work, "rm", "-q", "--cached", "cdn/b.exe")
+    git(work, "-c", f"user.name={NAME}", "-c", f"user.email={EMAIL}", "-c", "commit.gpgsign=false", "commit", "-q", "--amend", "-m", "feat: blobs")
+    git(work, "reflog", "expire", "--expire=now", "--all")
+    git(work, "gc", "-q", "--prune=now")
+    assert main("push", "-C", work) == 0
+    out = capsys.readouterr().out
+    assert "allowed: cdn/a.wasm (approved wasm)" in out
+    assert remote_main(bare) == git(work, "rev-parse", "HEAD")
+
+
+def test_scan_allow_still_refuses_everything_else(world, capsys):
+    work, bare = flagging_world(world, '[[repo_guard.scan_allow]]\npath = "cdn/*.wasm"\nreason = "approved"\n')
+    before = remote_main(bare)
+    assert main("push", "-C", work) == 1
+    cap = capsys.readouterr()
+    assert "allowed: cdn/a.wasm (approved)" in cap.out
+    assert "refused exe:" in cap.out and "cdn/b.exe" in cap.out
+    assert remote_main(bare) == before
+
+
+def test_scan_allow_kind_must_match(world, capsys):
+    work, bare = flagging_world(world, '[[repo_guard.scan_allow]]\npath = "cdn/*"\nkind = "wasm"\n')
+    assert main("push", "-C", work) == 1
+    assert "refused exe:" in capsys.readouterr().out
+
+
+def test_scan_allow_by_ref_needs_the_blob_on_that_ref(world, capsys):
+    work, bare = world
+    git(work, "checkout", "-q", "-b", "deps")
+    (work / "cdn").mkdir()
+    (work / "cdn" / "a.wasm").write_text("a-wasm\n", encoding="utf-8")
+    git(work, "add", "-A")
+    git(work, "-c", f"user.name={NAME}", "-c", f"user.email={EMAIL}", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "chore: wasm")
+    git(work, "checkout", "-q", "main")
+    (work / "tools").mkdir()
+    (work / "tools" / "build.py").write_text(FLAGGING_SCAN, encoding="utf-8")
+    project_file(work, '[repo_guard]\n[[repo_guard.scan_allow]]\npath = "cdn/*.wasm"\nref = "deps"\nreason = "on deps"\n')
+    git(work, "add", "-A", "-f")
+    git(work, "-c", f"user.name={NAME}", "-c", f"user.email={EMAIL}", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "feat: tools")
+    assert main("push", "-C", work) == 0
+    assert "allowed: cdn/a.wasm (on deps)" in capsys.readouterr().out
+    # the same blob committed on main under another path is not on deps
+    (work / "cdn").mkdir()
+    (work / "cdn" / "c.wasm").write_text("a-wasm\n", encoding="utf-8")
+    git(work, "add", "-A")
+    git(work, "-c", f"user.name={NAME}", "-c", f"user.email={EMAIL}", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "feat: c")
+    assert main("push", "-C", work) == 1
