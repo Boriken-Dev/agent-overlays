@@ -246,7 +246,8 @@ def test_validate_reports_what_is_missing(store):
 
 def run_cli(tmp_path, *argv):
     env = dict(os.environ, AGENTS_HOME=str(tmp_path / "store"), HOME=str(tmp_path),
-               USERPROFILE=str(tmp_path), PYTHONIOENCODING="utf-8")
+               USERPROFILE=str(tmp_path), PYTHONIOENCODING="utf-8",
+               ENGINEERING_OVERLAY_ROOT=str(OVERLAY))
     env.pop("AGENTS_PROJECT_ROOT", None)
     return subprocess.run(
         [sys.executable, str(MODULE), *argv],
@@ -287,3 +288,190 @@ def test_the_command_line_drives_a_plan_from_draft_to_done(tmp_path):
     assert closed.returncode == 0, closed.stderr
     assert (tmp_path / "plans" / "completed" / "relay_support.md").is_file()
     assert run_cli(tmp_path, "list", "--dir", d).stdout.strip() == ""
+
+
+# -- editing and reading parts ------------------------------------------------
+
+def body_of(store):
+    return reload(store).path.read_text(encoding="utf-8")
+
+
+def test_set_replaces_only_its_section(store, plan):
+    store.edit_body("relay_support", section="facts", set_text="- one fact\n- another")
+    after = reload(store)
+    assert after.section_text("Known Facts & Context").splitlines()[-2:] == ["- one fact", "- another"]
+    assert "<fact>" not in after.section_text("Known Facts & Context")
+    for kept in ("## Progress", "### Phase 2: encode the options", "## Verification", "# Relay support"):
+        assert kept in body_of(store)
+    assert [it.name for it in after.items()] == PHASES
+
+
+def test_a_body_is_refused_with_a_section_and_without_whole(store, plan):
+    with pytest.raises(SystemExit, match="--section facts --set"):
+        store.edit_body("relay_support", section="facts", body="x", whole=True)
+    with pytest.raises(SystemExit, match="--whole"):
+        store.edit_body("relay_support", body="x")
+    assert "### Phase 3" in body_of(store)
+    store.edit_body("relay_support", body="# Fresh\n", whole=True)
+    assert "### Phase 3" not in body_of(store)
+
+
+def test_an_unknown_section_lists_the_sections(store, plan):
+    for kwargs in ({"set_text": "x"}, {"append": "x"}, {"replace": ("a", "b")}):
+        with pytest.raises(SystemExit, match=r"no section 'nope'.*facts \(Known Facts & Context\)"):
+            store.edit_body("relay_support", section="nope", **kwargs)
+    with pytest.raises(SystemExit, match="--section"):
+        store.edit_body("relay_support", set_text="x")
+
+
+def test_a_section_text_cannot_start_another_section(store, plan):
+    with pytest.raises(SystemExit, match="new section"):
+        store.edit_body("relay_support", section="facts", set_text="- a\n## Oops\n")
+    store.edit_body("relay_support", section="facts", set_text="```\n## in a fence\n```")
+    assert "## in a fence" in body_of(store)
+
+
+def test_append_and_replace_stay_inside_the_section(store, plan):
+    store.edit_body("relay_support", section="verification", append="- second check")
+    assert reload(store).section_text("Verification").rstrip().endswith("- second check")
+    with pytest.raises(SystemExit, match="not found in section 'Verification'"):
+        store.edit_body("relay_support", section="verification", replace=("Phase 1", "x"))
+    store.edit_body("relay_support", section="phases", replace=("wire the relay", "wire it"))
+    assert "### Phase 3: wire it" in body_of(store)
+
+
+def test_phase_view_is_the_progress_line_then_the_block(store, plan):
+    loaded = reload(store)
+    loaded.mark("2", "x", "done")
+    view = loaded.phase_view("2")
+    assert view.startswith("- [x] Phase 2: encode the options — done\n\n### Phase 2: encode")
+    assert "Phase 3" not in view
+
+
+def test_a_note_goes_under_its_phase_block(store, plan):
+    store.note_phase("relay_support", "2", "the options field is 16 bits")
+    text = body_of(store)
+    assert reload(store).phase_text("2").rstrip().endswith("- Note: the options field is 16 bits")
+    assert text.index("- Note:") < text.index("### Phase 3")
+    assert "- Note:" not in reload(store).section_text("Known Facts & Context")
+    with pytest.raises(SystemExit, match="no phase"):
+        store.note_phase("relay_support", "9", "x")
+
+
+def test_phase_add_inserts_both_places_and_renumbers(store, plan):
+    _, number = store.add_phase("relay_support", "review the wire format", after="1")
+    loaded = reload(store)
+    assert number == "2"
+    assert [(it.id, it.name) for it in loaded.items()] == [
+        ("1", PHASES[0]), ("2", "review the wire format"), ("3", PHASES[1]), ("4", PHASES[2])]
+    assert "### Phase 4: wire the relay" in body_of(store)
+    assert loaded.phase_text("3").startswith("### Phase 3: encode the options")
+    store.add_phase("relay_support", "last one")
+    store.add_phase("relay_support", "first one", after="0")
+    names = [it.name for it in reload(store).items()]
+    assert names[0] == "first one" and names[-1] == "last one" and len(names) == 6
+    assert reload(store).phase_text("1").startswith("### Phase 1: first one")
+
+
+def test_phase_add_keeps_boxes_and_notes_with_their_phase(store, plan):
+    loaded = reload(store)
+    loaded.mark("1", "x", "shipped")
+    store.save(loaded)
+    store.add_phase("relay_support", "new first", after="0")
+    items = reload(store).items()
+    assert (items[1].id, items[1].box, items[1].note) == ("2", "x", "shipped")
+
+
+def test_phase_rename_changes_the_line_and_the_heading(store, plan):
+    store.rename_phase("relay_support", "2", "encode the flags")
+    loaded = reload(store)
+    assert loaded.item("2").name == "encode the flags"
+    assert loaded.phase_text("2").startswith("### Phase 2: encode the flags")
+
+
+def test_phase_remove_renumbers_and_refuses_a_checked_phase(store, plan):
+    loaded = reload(store)
+    loaded.mark("1", "x", "done")
+    store.save(loaded)
+    with pytest.raises(SystemExit, match="--force"):
+        store.remove_phase("relay_support", "1")
+    store.remove_phase("relay_support", "2")
+    loaded = reload(store)
+    assert [(it.id, it.name) for it in loaded.items()] == [("1", PHASES[0]), ("2", PHASES[2])]
+    assert loaded.phase_text("2").startswith("### Phase 2: wire the relay")
+    assert "encode the options" not in body_of(store)
+    store.remove_phase("relay_support", "1", force=True)
+    with pytest.raises(SystemExit, match="only phase"):
+        store.remove_phase("relay_support", "1", force=True)
+
+
+def test_phase_split_makes_template_blocks_for_the_new_parts(store, plan):
+    store.split_phase("relay_support", "2", ["encode flags", "encode lengths", "encode tail"])
+    loaded = reload(store)
+    assert [(it.id, it.name) for it in loaded.items()] == [
+        ("1", PHASES[0]), ("2", "encode flags"), ("3", "encode lengths"), ("4", "encode tail"),
+        ("5", PHASES[2])]
+    assert loaded.phase_text("3").startswith("### Phase 3: encode lengths")
+    assert "<paths>" in loaded.phase_text("3")
+    with pytest.raises(SystemExit, match="at least two"):
+        store.split_phase("relay_support", "1", ["only one"])
+
+
+def test_phase_management_refuses_a_plan_whose_blocks_disagree(store, plan):
+    store.edit_body("relay_support", section="phases", replace=("### Phase 3:", "### Phase 7:"))
+    with pytest.raises(SystemExit, match="disagree"):
+        store.add_phase("relay_support", "x")
+
+
+def test_the_command_line_reads_and_edits_parts(tmp_path):
+    d = str(tmp_path / "plans")
+
+    def run(*a):
+        return run_cli(tmp_path, *a, "--dir", d)
+
+    assert run("add", "relay_support", "-t", "Relay support", "-p", "parse", "-p", "encode").returncode == 0
+
+    refused = run("edit", "relay_support", "--section", "facts", "--body", "x")
+    assert refused.returncode != 0 and "--set" in refused.stderr
+    assert "--whole" in run("edit", "relay_support", "--body", "x").stderr
+    both = run("edit", "relay_support", "--section", "facts", "--set", "a", "--append", "b")
+    assert both.returncode != 0 and "one edit" in both.stderr
+    assert "facts" in run("edit", "relay_support", "--section", "nope", "--set", "x").stderr
+
+    f = tmp_path / "facts.md"
+    f.write_text("- from a file\n", encoding="utf-8")
+    assert run("edit", "relay_support", "-s", "facts", "--set-file", str(f)).returncode == 0
+    g = tmp_path / "more.md"
+    g.write_text("- appended from a file\n", encoding="utf-8")
+    assert run("edit", "relay_support", "-s", "facts", "--append-file", str(g)).returncode == 0
+    facts = run("show", "relay_support", "--section", "facts").stdout
+    assert "- from a file\n- appended from a file" in facts and "<fact>" not in facts
+    assert "### Phase 2: encode" in run("show", "relay_support", "--section", "phases").stdout
+
+    phase = run("show", "relay_support", "--phase", "2").stdout
+    assert phase.startswith("- [ ] Phase 2: encode\n\n### Phase 2: encode") and "Phase 1" not in phase
+    brief = run("show", "relay_support", "--brief").stdout
+    assert "# Relay support" in brief and "- [ ] Phase 2: encode" in brief and "### Phase" not in brief
+
+    assert run("phases", "relay_support").stdout.splitlines()[0].split() == ["1", "pending", "parse"]
+    run("status", "relay_support", "ready")
+    run("check", "relay_support", "1", "-m", "ok")
+    assert [p["state"] for p in json.loads(run("phases", "relay_support", "--format", "json").stdout)] == [
+        "done", "pending"]
+    assert run("phases", "relay_support", "--open").stdout.split()[:3] == ["2", "pending", "encode"]
+    assert run("next", "relay_support", "--block").stdout.startswith("### Phase 2: encode")
+
+    assert run("phase-add", "relay_support", "review", "--after", "1").returncode == 0
+    assert run("phase-rename", "relay_support", "2", "peer review").returncode == 0
+    assert run("phase-split", "relay_support", "3", "encode a", "encode b").returncode == 0
+    removed = run("phase-remove", "relay_support", "1")
+    assert removed.returncode != 0 and "--force" in removed.stderr
+    assert run("phase-remove", "relay_support", "4").returncode == 0
+    names = [p["title"] for p in json.loads(run("phases", "relay_support", "-f", "json").stdout)]
+    assert names == ["parse", "peer review", "encode a"]
+
+    noted = run("note", "relay_support", "-m", "port is 4433", "--phase", "2")
+    assert noted.returncode == 0 and "Phase 2" in noted.stdout
+    assert "- Note: port is 4433" in run("show", "relay_support", "-p", "2").stdout
+    assert run("note", "relay_support", "-m", "a general fact").returncode == 0
+    assert "- a general fact" in run("show", "relay_support", "-s", "facts").stdout

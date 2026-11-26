@@ -256,17 +256,21 @@ class Plans(LoggingArgs, Cli):
             return 0
 
     class Show(_Named):
-        """Print a plan, or just one part of it."""
+        """Print a plan, or just one part of it (a section, a phase, or the brief)."""
 
         _parsername_ = "show"
 
         section: str = ""
-        "One section: head, progress, facts, phases, verification, reporting."
+        "One section: head, progress, facts, phases, verification, reporting (or a heading)."
         ("--section", "-s")
 
         phase: str = ""
-        "One phase's block, by id."
+        "One phase: its Progress line and its `### Phase` block."
         ("--phase", "-p")
+
+        brief: bool = False
+        "Only the frontmatter, the title and the Progress lines."
+        ("--brief", "-b")
 
         as_json: bool = False
         "Emit structured JSON."
@@ -277,14 +281,41 @@ class Plans(LoggingArgs, Cli):
             if self.as_json:
                 _out(json.dumps(plan.as_dict(), indent=2) + "\n")
             elif self.phase:
-                _out(plan.phase_text(self.phase))
-            elif self.section == "head":
+                _out(plan.phase_view(self.phase))
+            elif self.brief:
+                _out(plan.head_text() + "\n" + plan.section_text(SECTIONS["progress"]))
+            elif self.section.strip().lower() == "head":
                 _out(plan.head_text())
             elif self.section:
-                heading = SECTIONS.get(self.section, self.section)
-                _out(plan.section_text(heading))
+                _out(plan.section_text(plan.resolve_heading(self.section)))
             else:
                 _out(plan.render())
+            return 0
+
+    class Phases(_Named):
+        """List the phases: id, state, title (`show --phase N` reads one)."""
+
+        _parsername_ = "phases"
+
+        open_only: bool = False
+        "Only the phases not yet checked."
+        ("--open",)
+
+        fmt: str = "table"
+        "Output format: table or json."
+        ("--format", "-f")
+
+        def __call__(self) -> int:
+            plan = self.store().require(self.name)
+            items = [it for it in plan.items() if not (self.open_only and it.box == "x")]
+            if self.fmt == "json":
+                _out(json.dumps([{"id": it.id, "state": it.state, "title": it.name, "note": it.note}
+                                 for it in items], indent=2) + "\n")
+            elif self.fmt == "table":
+                for it in items:
+                    _out("%s  %-7s  %s%s\n" % (it.id, it.state, it.name, " -- " + it.note if it.note else ""))
+            else:
+                raise _fail("--format is table or json")
             return 0
 
     class Next(_Named):
@@ -292,11 +323,20 @@ class Plans(LoggingArgs, Cli):
 
         _parsername_ = "next"
 
+        block_only: bool = False
+        "Only the current phase's `### Phase` block."
+        ("--block",)
+
         def __call__(self) -> int:
             plan = self.store().require(self.name)
+            current = plan.current()
+            if self.block_only:
+                if current is None:
+                    raise _fail("%s: every phase is checked" % plan.name)
+                _out(plan.phase_text(current.id))
+                return 0
             _out(plan.head_text() + "\n")
             _out(plan.section_text(SECTIONS["progress"]) + "\n")
-            current = plan.current()
             if current is None:
                 _out("Every phase is checked. Close the plan: "
                      "plans status %s done -m \"<evidence>\"\n" % plan.name)
@@ -362,18 +402,26 @@ class Plans(LoggingArgs, Cli):
         BOX = " "
 
     class Note(_Named):
-        """Append one fact to Known Facts & Context, when it is learned."""
+        """Append one fact to Known Facts & Context, or (with --phase) a note under a phase's block."""
 
         _parsername_ = "note"
 
         message: str = ""
-        "The fact, with its evidence."
+        "The fact or note, with its evidence."
         ("--message", "-m")
+
+        phase: str = ""
+        "Put the note under this phase's block instead of in Known Facts."
+        ("--phase", "-p")
 
         def __call__(self) -> int:
             if not self.message.strip():
                 raise _fail("pass -m: the fact to record")
             store = self.store()
+            if self.phase:
+                plan, it = store.note_phase(self.name, self.phase, self.message)
+                _out("%s: noted under Phase %s\n" % (plan.name, it.id))
+                return 0
             plan = store.require(self.name)
             plan.append_fact(self.message)
             store.save(plan)
@@ -402,48 +450,149 @@ class Plans(LoggingArgs, Cli):
             return 0
 
     class Edit(_Named):
-        """Edit a plan's body or a section."""
+        """Edit one section of a plan (`--section S --set|--append|--replace`), or the whole body (`--whole`)."""
 
         _parsername_ = "edit"
 
         section: str = ""
-        "Target section (`facts`, `verification`, `reporting`, or heading)."
+        "Target section: progress, facts, phases, verification, reporting, or a heading."
         ("--section", "-s")
 
+        set_text: Optional[str] = None
+        "Replace the section's content with this text (needs --section)."
+        ("--set",)
+
+        set_file: Optional[Path] = None
+        "Replace the section's content with this file's text (needs --section)."
+        ("--set-file",)
+
         append: Optional[str] = None
-        "Append text to the body or section."
+        "Append text to the section (or to the body's end without --section)."
         ("--append",)
 
+        append_file: Optional[Path] = None
+        "Append this file's text, as --append."
+        ("--append-file",)
+
         replace: "list[str]" = []
-        "Replace `OLD=NEW`."
+        "Replace exact text `OLD=NEW`, within the section when --section is given."
         ("--replace", "-r")
 
         body: Optional[str] = None
-        "Replace body text."
+        "Replace the WHOLE body with this text (needs --whole)."
         ("--body", "-b")
 
         body_file: Optional[Path] = None
-        "Replace body text from file."
+        "Replace the WHOLE body with this file's text (needs --whole)."
         ("--body-file",)
 
+        whole: bool = False
+        "Confirm that --body/--body-file replace the entire plan body."
+        ("--whole",)
+
+        @staticmethod
+        def _text(inline: Optional[str], path: Optional[Path], what: str) -> Optional[str]:
+            if inline is not None and path is not None:
+                raise _fail("pass --%s or --%s-file, not both" % (what, what))
+            if path is not None:
+                return Path(path).expanduser().read_text(encoding="utf-8-sig")
+            return inline
+
         def __call__(self) -> int:
-            body = self.body
-            if self.body_file is not None:
-                body = Path(self.body_file).expanduser().read_text(encoding="utf-8-sig")
+            body = self._text(self.body, self.body_file, "body")
+            set_text = self._text(self.set_text, self.set_file, "set")
+            append = self._text(self.append, self.append_file, "append")
             rep = None
             if self.replace:
                 if len(self.replace) != 1 or "=" not in self.replace[0]:
                     raise _fail("--replace takes one `OLD=NEW` pair")
                 old, new = self.replace[0].split("=", 1)
                 rep = (old, new)
+            if sum(x is not None for x in (body, set_text, append, rep)) > 1:
+                raise _fail("one edit at a time: --set, --append, --replace or --whole --body")
             plan = self.store().edit_body(
                 self.name,
                 body=body,
                 section=self.section or None,
-                append=self.append,
+                set_text=set_text,
+                append=append,
                 replace=rep,
+                whole=self.whole,
             )
             _out("%s\n" % plan.path)
+            return 0
+
+    class PhaseAdd(_Named):
+        """Add a phase: its Progress line and its `### Phase` block; later phases are renumbered."""
+
+        _parsername_ = "phase-add"
+
+        title: str = ""
+        "The new phase's title."
+        ("title",)
+
+        after: Optional[str] = None
+        "Insert after this phase id (0 = first); default: at the end."
+        ("--after",)
+
+        def __call__(self) -> int:
+            plan, number = self.store().add_phase(self.name, self.title, self.after)
+            _out("%s: added Phase %s; fill its block with plans edit %s --section phases ...\n"
+                 % (plan.name, number, plan.name))
+            return 0
+
+    class PhaseRename(_Named):
+        """Change a phase's title in Progress and in its block heading."""
+
+        _parsername_ = "phase-rename"
+
+        phase: str = ""
+        "Phase id."
+        ("phase",)
+
+        title: str = ""
+        "The new title."
+        ("title",)
+
+        def __call__(self) -> int:
+            plan, number = self.store().rename_phase(self.name, self.phase, self.title)
+            _out("%s: Phase %s renamed\n" % (plan.name, number))
+            return 0
+
+    class PhaseRemove(_Named):
+        """Remove a phase (Progress line and block); later phases are renumbered."""
+
+        _parsername_ = "phase-remove"
+
+        phase: str = ""
+        "Phase id."
+        ("phase",)
+
+        force: bool = False
+        "Remove a checked phase."
+        ("--force",)
+
+        def __call__(self) -> int:
+            plan, gone = self.store().remove_phase(self.name, self.phase, force=self.force)
+            _out("%s: removed Phase %s\n" % (plan.name, gone))
+            return 0
+
+    class PhaseSplit(_Named):
+        """Split one phase into several, in place: the first keeps the box and block, the rest start pending."""
+
+        _parsername_ = "phase-split"
+
+        phase: str = ""
+        "Phase id."
+        ("phase",)
+
+        titles: "list[str]" = []
+        "Two or more titles, in order."
+        ("titles",)
+
+        def __call__(self) -> int:
+            plan, ids = self.store().split_phase(self.name, self.phase, list(self.titles))
+            _out("%s: Phase %s is now Phases %s\n" % (plan.name, self.phase, ", ".join(ids)))
             return 0
 
     class Status(_Named):
@@ -534,8 +683,8 @@ class Plans(LoggingArgs, Cli):
             _out("%s\n" % self.store().root)
             return 0
 
-    _subcommands_ = [Add, List, Query, Show, Next, Start, Check, Block, Uncheck,
-                     Note, Set, Edit, Status, Rm, Validate, Migrate, Providers, PathCmd]
+    _subcommands_ = [Add, List, Query, Show, Phases, Next, Start, Check, Block, Uncheck,
+                     Note, Set, Edit, PhaseAdd, PhaseRename, PhaseRemove, PhaseSplit, Status, Rm, Validate, Migrate, Providers, PathCmd]
 
 
 if __name__ == "__main__":

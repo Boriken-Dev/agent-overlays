@@ -62,6 +62,7 @@ BOXES = {" ": "pending", "/": "active", "x": "done", "!": "blocked"}
 _SEP = " — "
 _ITEM_RE = re.compile(r"^- \[([ /x!])\] (.*)$")
 _PHASE_ID_RE = re.compile(r"^Phase\s+([0-9A-Za-z.]+)\s*:\s*(.*)$")
+_BLOCK_HEAD_RE = re.compile(r"^###\s+Phase\s+([0-9A-Za-z.]+)\s*:\s*(.*)$", re.IGNORECASE)
 _FIELD_RE = re.compile(r"^([A-Z][A-Za-z-]*):\s*(.*)$")
 _COMMENT_RE = re.compile(r"<!--.*?-->\n?", re.DOTALL)
 _PLACEHOLDER_RE = re.compile(r"<[a-z][^<>\n]*>")
@@ -399,10 +400,199 @@ class Plan:
         start, end = self.section(SECTIONS["phases"])
         blocks = [""]
         for n, p in enumerate(phases, 1):
-            blocks += ["### Phase %d: %s" % (n, p), "", "- Files: <paths>",
-                       "- Guidance: <signatures, hints, defaults>", "- Why: <one line>",
-                       "- Done-when: <observable check>", ""]
+            blocks += self._template_block(n, p) + [""]
         self.lines[start:end] = blocks
+
+    @staticmethod
+    def _template_block(number: "int | str", title: str) -> "list[str]":
+        return ["### Phase %s: %s" % (number, title), "", "- Files: <paths>",
+                "- Guidance: <signatures, hints, defaults>", "- Why: <one line>",
+                "- Done-when: <observable check>"]
+
+    # -- named sections, whole or in part -------------------------------------
+
+    def headings(self) -> "list[str]":
+        return [line[3:].strip() for line in self.lines if line.startswith("## ")]
+
+    def resolve_heading(self, name: str) -> str:
+        """The `## ` heading a section key (`facts`) or heading text names; an unknown one lists the plan's sections."""
+        wanted = name.strip().lower()
+        existing = self.headings()
+        for heading in existing:
+            if heading.lower() == wanted:
+                return heading
+        key = SECTIONS.get(wanted)
+        if key and key in existing:
+            return key
+        known = ["%s (%s)" % (k, v) for k, v in SECTIONS.items() if v in existing]
+        known += [h for h in existing if h not in SECTIONS.values()]
+        raise _fail("%s has no section %r (it has: %s)" % (self.name, name, ", ".join(known) or "none"))
+
+    @staticmethod
+    def _check_text(text: str) -> "list[str]":
+        lines = text.rstrip("\r\n").splitlines()
+        fenced = False
+        for line in lines:
+            if line.lstrip().startswith("```"):
+                fenced = not fenced
+            elif not fenced and line.startswith("## "):
+                raise _fail("the text holds a `## ` heading line (%r), which would start a new section; "
+                            "write it as `### ` or lower, or edit the plan file" % line)
+        return lines
+
+    def set_section(self, heading: str, text: str) -> None:
+        """Replace everything under `## heading`; the heading line stays."""
+        lines = self._check_text(text)
+        start, end = self.section(heading)
+        self.lines[start:end] = [""] + lines + [""]
+        self.meta["updated"] = _today()
+
+    def append_section(self, heading: str, text: str) -> None:
+        lines = self._check_text(text)
+        start, end = self.section(heading)
+        at = end
+        while at > start and not self.lines[at - 1].strip():
+            at -= 1
+        self.lines[at:at] = lines
+        self.meta["updated"] = _today()
+
+    # -- phases: reading, notes, structure ------------------------------------
+
+    def phase_view(self, phase: str) -> str:
+        """A phase's Progress line, then its `### Phase` block."""
+        it = self.item(phase)
+        return it.render() + "\n\n" + self.phase_text(it.id)
+
+    def _block_end(self, phase_id: str) -> int:
+        start, end = self.section(SECTIONS["phases"])
+        head = re.compile(r"^###\s+Phase\s+%s\s*:" % re.escape(phase_id), re.IGNORECASE)
+        for i in range(max(start, 0), max(end, 0)):
+            if head.match(self.lines[i]):
+                stop = i + 1
+                while stop < end and not self.lines[stop].startswith("### "):
+                    stop += 1
+                return stop
+        raise _fail("%s has no `### Phase %s:` block in its body%s" % (
+            self.name, phase_id, " (a complex plan keeps it in its own file)" if self.is_complex else ""))
+
+    def append_phase_note(self, phase: str, text: str) -> Item:
+        it = self.item(phase)
+        at = self._block_end(it.id)
+        while at > 0 and not self.lines[at - 1].strip():
+            at -= 1
+        self.lines.insert(at, "- Note: " + " ".join(text.split()))
+        self.meta["updated"] = _today()
+        return it
+
+    def _phase_layout(self, *, numeric: bool):
+        items = self.items()
+        if not items:
+            raise _fail("%s has no phases in Progress" % self.name)
+        if numeric and not all(it.id.isdigit() for it in items):
+            raise _fail("%s numbers its phases %s; renumbering needs plain numbers, edit the file by hand"
+                        % (self.name, ", ".join(it.id for it in items)))
+        start, end = self.section(SECTIONS["phases"])
+        if start < 0:
+            raise _fail("%s has no `## %s` section" % (self.name, SECTIONS["phases"]))
+        heads = [(i, m) for i in range(start, end) if (m := _BLOCK_HEAD_RE.match(self.lines[i]))]
+        ids = [it.id.lower() for it in items]
+        block_ids = [m.group(1).lower() for _, m in heads]
+        if sorted(ids) != sorted(block_ids):
+            raise _fail("%s: Progress (%s) and its `### Phase` blocks (%s) disagree; fix that first (`plans validate %s`)"
+                        % (self.name, ", ".join(ids), ", ".join(block_ids) or "none", self.name))
+        pre = list(self.lines[start:heads[0][0]]) if heads else list(self.lines[start:end])
+        blocks = {}
+        for n, (i, m) in enumerate(heads):
+            stop = heads[n + 1][0] if n + 1 < len(heads) else end
+            body = list(self.lines[i:stop])
+            while body and not body[-1].strip():
+                body.pop()
+            blocks[m.group(1).lower()] = (m.group(2), body)
+        entries = []
+        for it in items:
+            btitle, body = blocks[it.id.lower()]
+            entries.append({"id": it.id, "box": it.box, "name": it.name, "note": it.note,
+                            "btitle": btitle, "block": body})
+        return entries, pre
+
+    def _write_phase_layout(self, entries, pre, *, renumber: bool) -> None:
+        start, end = self.section(SECTIONS["phases"])
+        out = list(pre) if pre else [""]
+        for n, e in enumerate(entries, 1):
+            if renumber:
+                e["id"] = str(n)
+            block = list(e["block"])
+            block[0] = "### Phase %s: %s" % (e["id"], e["btitle"])
+            out += block + [""]
+        self.lines[start:end] = out
+        items = self.items()
+        first, last = items[0].index, items[-1].index
+        if last - first + 1 != len(items):
+            raise _fail("%s: the Progress list has other lines between its phases; edit the file by hand" % self.name)
+        self.lines[first:last + 1] = [
+            "- [%s] Phase %s: %s%s" % (e["box"], e["id"], e["name"], _SEP + e["note"] if e["note"] else "")
+            for e in entries]
+        self.meta["updated"] = _today()
+
+    def _entry_at(self, entries, phase: str) -> int:
+        wanted = self.item(phase).id.lower()
+        for n, e in enumerate(entries):
+            if e["id"].lower() == wanted:
+                return n
+        raise _fail("%s has no phase %r" % (self.name, phase))
+
+    def add_phase(self, title: str, after: Optional[str] = None) -> str:
+        title = " ".join(title.split())
+        if not title:
+            raise _fail("the phase needs a title")
+        entries, pre = self._phase_layout(numeric=True)
+        if after in (None, ""):
+            at = len(entries)
+        elif str(after).strip() == "0":
+            at = 0
+        else:
+            at = self._entry_at(entries, str(after)) + 1
+        entries.insert(at, {"id": "0", "box": " ", "name": title, "note": "", "btitle": title,
+                            "block": self._template_block(0, title)})
+        self._write_phase_layout(entries, pre, renumber=True)
+        return entries[at]["id"]
+
+    def rename_phase(self, phase: str, title: str) -> str:
+        title = " ".join(title.split())
+        if not title:
+            raise _fail("the phase needs a title")
+        entries, pre = self._phase_layout(numeric=False)
+        e = entries[self._entry_at(entries, phase)]
+        e["name"] = e["btitle"] = title
+        self._write_phase_layout(entries, pre, renumber=False)
+        return e["id"]
+
+    def remove_phase(self, phase: str, *, force: bool = False) -> str:
+        entries, pre = self._phase_layout(numeric=True)
+        n = self._entry_at(entries, phase)
+        e = entries[n]
+        if e["box"] == "x" and not force:
+            raise _fail("Phase %s is checked (%s); pass --force to remove a finished phase" % (e["id"], e["name"]))
+        if len(entries) == 1:
+            raise _fail("Phase %s is the plan's only phase; a plan needs one" % e["id"])
+        del entries[n]
+        self._write_phase_layout(entries, pre, renumber=True)
+        return "%s: %s" % (e["id"], e["name"])
+
+    def split_phase(self, phase: str, titles: "list[str]") -> "list[str]":
+        titles = [" ".join(t.split()) for t in titles]
+        if len(titles) < 2 or not all(titles):
+            raise _fail("split needs at least two non-empty titles")
+        entries, pre = self._phase_layout(numeric=True)
+        n = self._entry_at(entries, phase)
+        # The first part keeps the box, the outcome and the written block; the others start pending, from the template.
+        parts = [dict(entries[n], name=titles[0], btitle=titles[0])]
+        for t in titles[1:]:
+            parts.append({"id": "0", "box": " ", "name": t, "note": "", "btitle": t,
+                          "block": self._template_block(0, t)})
+        entries[n:n + 1] = parts
+        self._write_phase_layout(entries, pre, renumber=True)
+        return [e["id"] for e in parts]
 
     # -- summaries ------------------------------------------------------------
 
@@ -669,36 +859,75 @@ class PlansStore:
         *,
         body: Optional[str] = None,
         section: Optional[str] = None,
+        set_text: Optional[str] = None,
         append: Optional[str] = None,
         replace: "Optional[tuple[str, str]]" = None,
+        whole: bool = False,
     ) -> Plan:
+        """One edit: replace a section (`set_text`), append (to a section, else to the body's end), replace
+        exact text (within a section, else the body), or, only with `whole` and no section, replace the body."""
+        if body is not None:
+            if section:
+                raise _fail("--body/--body-file replace the WHOLE plan body and ignore --section; "
+                            "to replace one section use `--section %s --set TEXT` (or --set-file)" % section)
+            if not whole:
+                raise _fail("--body/--body-file replace the WHOLE plan body; pass --whole if that is meant, "
+                            "or edit one section with `--section S --set TEXT` / `--append`")
         plan = self.require(name)
+        heading = plan.resolve_heading(section) if section else None
         if body is not None:
             plan.lines = body.splitlines()
-        elif section and append is not None:
-            heading = SECTIONS.get(section.lower(), section)
-            start, end = plan.section(heading)
-            if start < 0:
-                if plan.lines and plan.lines[-1].strip():
-                    plan.lines.append("")
-                plan.lines.extend(["## " + heading, "", append.rstrip("\r\n"), ""])
-            else:
-                at = end
-                while at > start and not plan.lines[at - 1].strip():
-                    at -= 1
-                plan.lines.insert(at, append.rstrip("\r\n"))
+        elif set_text is not None:
+            if heading is None:
+                raise _fail("--set replaces a section: pass --section S")
+            plan.set_section(heading, set_text)
         elif append is not None:
-            plan.lines.extend(["", append.rstrip("\r\n")])
+            if heading is not None:
+                plan.append_section(heading, append)
+            else:
+                plan.lines.extend(["", append.rstrip("\r\n")])
         elif replace is not None:
-            full = "\n".join(plan.lines)
-            if replace[0] not in full:
-                raise _fail("%s: %r not found in body" % (plan.name, replace[0]))
-            plan.lines = full.replace(replace[0], replace[1]).splitlines()
+            start, end = plan.section(heading) if heading else (0, len(plan.lines))
+            scope = "\n".join(plan.lines[start:end])
+            if replace[0] not in scope:
+                raise _fail("%s: %r not found in %s" % (
+                    plan.name, replace[0], "section %r" % heading if heading else "body"))
+            plan.lines[start:end] = scope.replace(replace[0], replace[1]).splitlines()
         else:
-            raise _fail("pass --body, --append, or --replace")
+            raise _fail("pass --set, --append or --replace (--whole --body-file replaces everything)")
         plan.meta["updated"] = _today()
         plan.save()
         return plan
+
+    def add_phase(self, name: str, title: str, after: Optional[str] = None) -> "tuple[Plan, str]":
+        plan = self.require(name)
+        number = plan.add_phase(title, after)
+        plan.save()
+        return plan, number
+
+    def rename_phase(self, name: str, phase: str, title: str) -> "tuple[Plan, str]":
+        plan = self.require(name)
+        number = plan.rename_phase(phase, title)
+        plan.save()
+        return plan, number
+
+    def remove_phase(self, name: str, phase: str, *, force: bool = False) -> "tuple[Plan, str]":
+        plan = self.require(name)
+        gone = plan.remove_phase(phase, force=force)
+        plan.save()
+        return plan, gone
+
+    def split_phase(self, name: str, phase: str, titles: "list[str]") -> "tuple[Plan, list[str]]":
+        plan = self.require(name)
+        ids = plan.split_phase(phase, titles)
+        plan.save()
+        return plan, ids
+
+    def note_phase(self, name: str, phase: str, text: str) -> "tuple[Plan, Item]":
+        plan = self.require(name)
+        it = plan.append_phase_note(phase, text)
+        plan.save()
+        return plan, it
 
     def set_status(self, name: str, status: str, *, note: str = "", force: bool = False) -> Plan:
         status = status.strip().lower()
