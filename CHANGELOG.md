@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- engineering: the plans skill documents migrating a legacy plans, findings and decisions store and the gaps the migrate commands leave.
+
 - engineering: the command `blob-scan <repo>` finds the blobs a malware or archive scanner may refuse (archives, encrypted data,
   executables, key files, git packs, opaque binaries) in every ref of any repository, with nothing but git. `skills/blob-scan/SKILL.md`
   says how it differs from the shared `build.py scan`.

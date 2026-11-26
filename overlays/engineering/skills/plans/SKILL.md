@@ -46,3 +46,13 @@ plans query --select name,status,title,description --where "status='executing'"
 - `--body` / `--body-file` replace the whole body (only with `--whole`, never with `--section`). Change a part with `--section S --set`, `--append` or `--replace`; an unknown section is an error that lists the plan's sections.
 - Section text may not hold a `## ` line (it would start a section); `### ` and lower are fine. `phase-*` need plain numeric phase ids and Progress and the `### Phase` blocks in agreement (`plans validate`); a new or split phase gets a template block to fill.
 - `query` columns: `name`, `status`, `folder`, `path`, `is_complex`, `extras_count`, `title`, `description`, plus the frontmatter attributes; there is no modified time.
+
+## Migrating a legacy store
+
+Run `plans migrate --dir DIR`, `dotagents findings migrate` and `decisions migrate --dir DIR` (each takes `--dry-run`), then check:
+
+- `plans migrate` reads the status from the old body line, files each plan under `plans/<status>/`, merges a complex plan's parent into its `README.md` and removes `INDEX.md`. It also rewrites plans already in `completed/`. Afterwards a plan that was `executing` with nothing running is still `executing`: set it with `plans status NAME ready -m ...`.
+- `dotagents findings migrate` moves flat files to `active/` and requotes values, but leaves `name:` and `status:` in the frontmatter of every finding, the processed ones too. Strip those two keys with a script that keeps the file's line endings.
+- `decisions migrate` drops `id`, `name`, `title` and `status` from the frontmatter itself.
+- References to the old paths (`plans/NAME.md`, `findings/SLUG.md`, `INDEX.md`) in notes and other plans are not rewritten; grep for them.
+- `plans validate` takes one plan name (no validate-all) and reports `<id>`-style text in a body as an unfilled placeholder, so a plan that names a placeholder in prose never passes.
