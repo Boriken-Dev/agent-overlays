@@ -21,7 +21,7 @@ holds only what had to be rediscovered.
 
 ## Peers and grants
 
-- `fs_roots` take literal directories. A glob such as `/work/ai6-*` is kept as text and matches nothing (every path is
+- `fs_roots` take literal directories. A glob such as `/work/proj-*` is kept as text and matches nothing (every path is
   "leaves the directories this peer may use"); repeat `--fs-root` for each directory.
 - `bohio peer approve ID --allow exec,fs.read,fs.write --fs-root DIR ...` replaces the peer's whole table each time it is
   given any of `--allow/--fs-root/--program`.
