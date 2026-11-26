@@ -401,3 +401,6 @@ C toolchain detail surfacing as an error that names something else.
   OS is ARM64. Use `rustc -vV`, or the OS's own report, not the environment variable.
 - **x64 emulation is user-mode only.** No x64 *driver* can load on an ARM64 Windows
   machine, and no amount of certificate work changes that.
+- **Keep `CARGO_TARGET_DIR` off NFS.** Under parallel load rustc's archive step memory-maps `.rlib` files it has just
+  written, and on an NFS mount that races: "failed to map object file: memory map must have a non-zero length". Put sources,
+  tarballs and logs on the share if space is short; keep the target on local disk.
