@@ -50,16 +50,23 @@ storage backends (`github`, `gitlab`, `jira`, `ai6`).
 | --- | --- |
 | what exists | `plans list` / `plans list --where "status = 'ready'"` |
 | SQL search | `plans query "SELECT name, status, done, total, title FROM plans ..."` |
-| what to do now | `plans next <name>`: attributes, progress, current phase |
-| one part | `plans show <name> --section facts` / `--phase 3` |
+| what to do now | `plans next <name>`: attributes, progress, current phase; `--block`: only that phase's block |
+| the phases | `plans phases <name>` (`--open`, `--format json`): id, state, title |
+| one part | `plans show <name> --section facts` / `--phase 3` / `--brief` (frontmatter, title, progress) |
 | attributes | `plans set <name> --attr key=val` / `--unset key` |
-| body / section | `plans edit <name> --section facts --append "..."` / `--replace old=new` |
+| rewrite a section | `plans edit <name> --section facts --set "..."` / `--set-file F` |
+| add to a section | `plans edit <name> --section facts --append "..."` / `--append-file F` |
+| change exact text | `plans edit <name> [--section S] --replace old=new` |
+| add, rename, remove, split a phase | `plans phase-add <name> "title" [--after N]` / `phase-rename <name> N "title"` / `phase-remove <name> N [--force]` / `phase-split <name> N "A" "B"`: Progress line and block together, renumbered |
 | a step | `plans start`, `check -m`, `block -m`, `uncheck` |
-| a fact learned | `plans note <name> -m "..."` |
+| a fact learned | `plans note <name> -m "..."`; on one phase: `plans note <name> --phase 3 -m "..."` |
 | remove / migrate | `plans rm <name>` / `plans migrate` |
 | other records | `records query|show|add|set|edit|mv|rm <folder>` |
 
 Do not read a whole plan to learn one thing, or rewrite one to change a line.
+`--body` / `--body-file` replace the entire plan and need `--whole`; to change one
+section use `--section S --set`, never a whole-body file. Edit phases with the
+`phase-*` commands, not by hand: they keep the Progress list and the blocks in step.
 
 ## Ready Checklist
 
