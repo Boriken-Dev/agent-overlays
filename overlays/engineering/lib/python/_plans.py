@@ -65,7 +65,10 @@ _PHASE_ID_RE = re.compile(r"^Phase\s+([0-9A-Za-z.]+)\s*:\s*(.*)$")
 _BLOCK_HEAD_RE = re.compile(r"^###\s+Phase\s+([0-9A-Za-z.]+)\s*:\s*(.*)$", re.IGNORECASE)
 _FIELD_RE = re.compile(r"^([A-Z][A-Za-z-]*):\s*(.*)$")
 _COMMENT_RE = re.compile(r"<!--.*?-->\n?", re.DOTALL)
-_PLACEHOLDER_RE = re.compile(r"<[a-z][^<>\n]*>")
+# What the plan template leaves for the author, and a line that is nothing but one `<...>`; other angle brackets are prose.
+_PLACEHOLDER_RE = re.compile(
+    r"<(?:fact|paths|signatures, hints, defaults[^<>\n]*|one line|observable check|command)>"
+    r"|^\s*(?:[-*]\s+)?<[^<>\n]+>\s*$")
 _CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
 
 _PLAN_KEY_ORDER = (
@@ -671,7 +674,7 @@ class Plan:
                          % (missing, missing))
         for extra in [b for b in blocks if b not in ids]:
             found.append("`### Phase %s:` has no line in Progress" % extra)
-        left = sorted({m.group(0) for line in _prose_lines(self.lines)
+        left = sorted({m.group(0).strip().lstrip("-* ") for line in _prose_lines(self.lines)
                        for m in _PLACEHOLDER_RE.finditer(line)})
         if left:
             found.append("unfilled placeholders: %s" % ", ".join(left[:6]))
@@ -1039,6 +1042,15 @@ class PlansStore:
         top_plans = [p for p in self.all() if "/" not in p.name]
         for plan in top_plans:
             st = plan.status if plan.status in STATUS_DIRS else "draft"
+            sub_dir = plan.path.with_suffix("")
+            if st == "done" and plan.path.parent.parent == self.root and not plan.is_complex:
+                # A closed plan already in its folder is a record of the past: only the layout may change.
+                if sub_dir.is_dir() and not dry_run:
+                    readme = sub_dir / "README.md"
+                    plan.path.replace(readme)
+                if sub_dir.is_dir():
+                    moved.append("%s -> %s" % (plan.name, sub_dir / "README.md"))
+                continue
             # From here the folder says the status, so the frontmatter stops saying it.
             plan.folder_status = st
             plan.meta.pop("status", None)

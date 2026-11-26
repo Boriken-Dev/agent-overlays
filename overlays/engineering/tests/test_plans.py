@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -240,8 +241,47 @@ def test_validate_reports_what_is_missing(store):
         handle.write(text)
     assert store.require("filled").problems() == []
     with open(good.path, "a", encoding="utf-8", newline="") as handle:
-        handle.write("- left: <todo>\n")
+        handle.write("- <todo>\n")
     assert "unfilled placeholders: <todo>" in "\n".join(store.require("filled").problems())
+
+
+def test_only_template_placeholders_count_as_unfilled(store):
+    made = store.add("prose", title="Prose", executor="executor/code — routine", phases=["one"])
+    text = made.path.read_text(encoding="utf-8")
+    for placeholder, value in (("<paths>", "src/x.py"), ("<one line>", "needed"), ("<observable check>", "ok"),
+                               ("<fact>", "measured"), ("<command> → <expected>", "pytest → green")):
+        text = text.replace(placeholder, value)
+    text = re.sub(r"<signatures, hints, defaults[^<>\n]*>", "f(x)", text)
+    text += "\n- The `<id>` and `<scope>` keys, and a plain <id> or <scope> in prose, are not placeholders.\n"
+    with open(made.path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+    assert store.require("prose").problems() == []
+    with open(made.path, "a", encoding="utf-8", newline="") as handle:
+        handle.write("- Files: <paths>\n")
+    assert "unfilled placeholders: <paths>" in "\n".join(store.require("prose").problems())
+
+
+def test_validate_with_no_name_checks_every_plan(tmp_path):
+    d = str(tmp_path / "plans")
+    assert run_cli(tmp_path, "add", "fresh", "--dir", d, "-t", "Fresh").returncode == 0
+    out = run_cli(tmp_path, "validate", "--dir", d)
+    assert out.returncode == 1, out.stderr
+    assert "fresh: unfilled placeholders" in out.stdout and "1 plans, 1 with problems" in out.stdout
+    other = tmp_path / "other"
+    other.mkdir()
+    empty = run_cli(other, "validate", "--dir", str(other / "plans"))
+    assert empty.returncode == 0 and "0 plans, 0 with problems" in empty.stdout
+
+
+def test_migrate_leaves_a_plan_already_in_completed_alone(store):
+    done = store.root / "completed"
+    done.mkdir(parents=True)
+    old = "---\nname: old_one\nstatus: done\ncreated: 2026-01-01\n---\n\n# Old\n\nSee <id>.\r\n"
+    with open(done / "old_one.md", "w", encoding="utf-8", newline="") as handle:
+        handle.write(old)
+    res = store.migrate()
+    assert res["moved"] == [] and res["updated"] == []
+    assert (done / "old_one.md").read_bytes() == old.encode("utf-8")
 
 
 def run_cli(tmp_path, *argv):

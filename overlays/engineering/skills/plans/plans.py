@@ -636,18 +636,24 @@ class Plans(LoggingArgs, Cli):
             return 0
 
     class Validate(_Named):
-        """Check a plan against the required shape. Exit 1 lists what is wrong."""
+        """Check a plan against the required shape; with no name, every plan. Exit 1 lists what is wrong."""
 
         _parsername_ = "validate"
 
         def __call__(self) -> int:
-            plan = self.store().require(self.name)
-            problems = plan.problems()
-            for problem in problems:
-                _out("%s: %s\n" % (plan.name, problem))
-            if not problems:
-                _out("%s: ok\n" % plan.name)
-            return 1 if problems else 0
+            store = self.store()
+            plans = [store.require(self.name)] if self.name else sorted(store.all(), key=lambda p: p.name)
+            bad = 0
+            for plan in plans:
+                problems = plan.problems()
+                bad += bool(problems)
+                for problem in problems:
+                    _out("%s: %s\n" % (plan.name, problem))
+                if not problems and self.name:
+                    _out("%s: ok\n" % plan.name)
+            if not self.name:
+                _out("%d plans, %d with problems\n" % (len(plans), bad))
+            return 1 if bad else 0
 
     class Migrate(_Base):
         """Migrate legacy flat plans and body metadata to frontmatter + status folders, removing INDEX.md."""
