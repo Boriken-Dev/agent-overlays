@@ -265,7 +265,9 @@ def allowed_hits(guard: Guard, scan_output: str) -> tuple[list[tuple[str, str, s
                 continue
             ref = entry.get("ref")
             if ref:
-                found = reach.setdefault(ref, _reachable(guard, ref))
+                if ref not in reach:
+                    reach[ref] = _reachable(guard, ref)
+                found = reach[ref]
                 if not any(s.startswith(sha) and p == path for s, p in found):
                     continue
             reason = entry.get("reason", "")
