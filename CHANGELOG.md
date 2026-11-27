@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- private-sync: the turn-end hook returns at once. It records the request and starts the sync as a detached runner with a
+  single-flight lock, so turns that end during a sync join its next pass instead of racing it and the hook no longer
+  reports `hook-failed private-sync turn-end timeout`. The runner syncs every linked store with uncommitted or unpushed work,
+  not only the project's, runs git without auto-maintenance and with a per-call timeout, retries a rejected push, leaves a
+  failure the next hook reports, and logs each git step's seconds. `background`, `interval`, `git_timeout`, `stale`,
+  `sweep_interval` and `maintenance_interval` are settings; maintenance (`worktree prune`, `gc --auto`) is its own step.
+
 - engineering: the plans skill documents migrating a legacy plans, findings and decisions store and the gaps the migrate commands leave.
 
 - engineering: the command `blob-scan <repo>` finds the blobs a malware or archive scanner may refuse (archives, encrypted data,

@@ -170,8 +170,51 @@ in this overlay's `overlay.cfg`, scripts in its `hooks/`) make a cloud session i
 
 - `session-start` runs `private-sync-start.sh`: clones the private repo to `~/.agents` on first
   run (or `git pull --rebase` if present), then `private-sync link`s the project.
-- `turn-end` runs `private-sync-stop.sh`: `private-sync sync --project` to push the
-  session's changes back.
+- `turn-end` runs `private-sync-stop.sh`: records the request and starts the sync detached, then
+  returns in well under a second (see *Background sync*).
+
+**Background sync.** A turn can end every minute and several sessions share one store, while a
+pull, commit and push of a large store is several network round trips (2 to 14 s each on a slow
+link, so tens of seconds idle and minutes under load). A fixed hook deadline cannot hold that, so
+`turn-end` only writes `<agents>/.cache/private-sync/pending/<project>.json` and starts a detached
+runner (`hooks/run_link.py runner`, `lib/python/_bgsync.py`) unless one is already running:
+
+- **One runner per store.** `sync.lock` is single-flight and refreshed at every git step; a request
+  made while a runner works is merged into its next pass (requests for one project are one file).
+  A lock with no progress for `stale` seconds is taken over.
+- **Every linked store with work.** A pass syncs the named project, then sweeps the other linked
+  store worktrees of `~/.agents` and syncs those with uncommitted or unpushed work (one local
+  `git status` each), so a store a session wrote to without naming its project is not left behind.
+- **No auto-maintenance in the sync.** Every git call runs with `gc.auto=0` and
+  `maintenance.auto=false`, ends at `git_timeout` (the whole process tree), and never waits on a
+  terminal. A rejected push (another process pushed first) is rebased and retried twice.
+  Maintenance (`git worktree prune`, which forgets metadata for a vanished directory and never
+  deletes one, then `git gc --auto`) is its own step, asked for at session start at most every
+  `maintenance_interval` and run by the runner.
+- **Failure is reported next turn.** A pass that hit a `WARN`, a timeout or an exception writes
+  `failure.json`; the next `turn-end` or `session-start` says so once on standard error and
+  the next good pass removes it. `sync.log` (bounded, one rotation, no credentials) holds each
+  git step's seconds: read it to see which step was slow.
+- **Windows.** The harness runs a hook in a job object that ends everything the hook started, even
+  with breakaway, so the runner is started through the WMI service (about 0.4 s). That route cannot
+  carry `DOTAGENTS_AGENTS_TOKEN` (a credential is never written to a file), so a run with a token
+  syncs before the hook returns; cloud containers are Linux and detach normally.
+
+Settings, each `PRIVATE_SYNC_<NAME>` in the environment (a hook's environment may not carry the
+shell's), else `name = value` in `<agents>/private-sync.cfg`, else the default. An out-of-range or
+non-numeric value is ignored.
+
+| name | default | meaning |
+| --- | --- | --- |
+| `background` | 1 | 0: the hook syncs before it returns (a cloud container that ends with the turn) |
+| `interval` | 30 | seconds between passes; requests made sooner wait and merge |
+| `git_timeout` | 120 | seconds one git call may run |
+| `stale` | 900 | seconds without progress before a lock is taken over |
+| `sweep_interval` | 300 | seconds between sweeps of the other stores; 0 never |
+| `maintenance_interval` | 86400 | seconds between maintenance runs; 0 never |
+
+The hook's own `timeout` in `overlay.cfg` now bounds only the fallback that syncs in the hook; the
+user's `timeout` setting of dotagents (`hooks-settings.json`) still overrides it.
 
 They are AOS hooks, so they are **off until you allow them at the overlay's digest**, and
 `dotagents init -g` wires the harness's own hooks to run them (Claude Code's `SessionStart` and
