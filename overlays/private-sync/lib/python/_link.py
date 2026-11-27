@@ -731,23 +731,57 @@ def _store_branch_target(project_dir: Path, agents_dir: Path, name: str) -> "str
     return head if head and head == wanted else None
 
 
+def _pull_failure(res) -> str:
+    return (res.stderr or "").strip().splitlines()[-1:] and (res.stderr or "").strip().splitlines()[-1] or ""
+
+
+def _push_retrying(target: Path, push_args, pull_args, *, config_args, auth_env, log):
+    """Push; when another process pushed first (rejected), rebase onto it and push again, twice
+    at most. Returns the last result."""
+    res = _git(target, *push_args, capture=True, config_args=config_args, env=auth_env)
+    for _ in range(2):
+        text = (res.stderr or "").lower()
+        if res.returncode == 0 or "rejected" not in text and "non-fast-forward" not in text:
+            break
+        log("note: push raced another; rebasing and retrying")
+        _git(target, *pull_args, capture=True, config_args=config_args, env=auth_env)
+        res = _git(target, *push_args, capture=True, config_args=config_args, env=auth_env)
+    return res
+
+
 def _sync_branch(target: Path, branch: str, message: str, *, pull: bool, push: bool,
                  config_args, auth_env, log) -> None:
     """Commit and push a project's worktree on its own branch."""
+    pull_args = ("pull", "--rebase", "--autostash", "origin", branch)
     if pull and _has_origin(target):
-        res = _git(target, "pull", "--rebase", "--autostash", "origin", branch,
-                   capture=True, config_args=config_args, env=auth_env)
+        res = _git(target, *pull_args, capture=True, config_args=config_args, env=auth_env)
         if res.returncode != 0:
-            log("note: pull of %s skipped/failed", branch)
+            log("note: pull of %s skipped/failed (%s)", branch, _pull_failure(res))
     _git(target, "add", "-A")
     if (_git(target, "status", "--porcelain", capture=True).stdout or "").strip():
         log("git commit -m %r (branch %s)", message, branch)
         _git(target, "commit", "-m", message)
     if push and _has_origin(target):
-        res = _git(target, "push", "-u", "origin", branch, capture=True,
-                   config_args=config_args, env=auth_env)
+        res = _push_retrying(target, ("push", "-u", "origin", branch), pull_args,
+                             config_args=config_args, auth_env=auth_env, log=log)
         if res.returncode != 0:
             log("WARN: git push of %s failed: %s", branch, (res.stderr or "").strip())
+
+
+def sync_worktree(target, branch: str, message: str, *, pull: bool = True, push: bool = True,
+                  logger=None) -> None:
+    """Commit and push one linked store worktree on its own branch, with the token auth."""
+    log = _Log(logger)
+    config_args, auth_env, auth_tmp = _agents_git_auth(log)
+    try:
+        _sync_branch(Path(target), branch, message, pull=pull, push=push,
+                     config_args=config_args, auth_env=auth_env, log=log)
+    finally:
+        if auth_tmp:
+            try:
+                os.unlink(auth_tmp)
+            except OSError:
+                pass
 
 
 def _warn_gitignore(project_dir: Path, log) -> None:
@@ -821,21 +855,77 @@ def ensure_store_gitignore(agents_dir: Path, *, dry_run: bool = False, log=None)
     return True
 
 
+#: Git settings every call of the sync path runs under. Maintenance (`gc --auto`, which a pull or a
+#: commit starts on its own) is its own explicit step, in ``_bgsync``: inside a sync it repacks a
+#: large store for minutes.
+NO_MAINTENANCE = ["-c", "gc.auto=0", "-c", "maintenance.auto=false"]
+
+#: Seconds a git call may run before its process tree is ended (exit 124); None is no bound. Set
+#: by the background runner from the ``git_timeout`` setting.
+git_timeout: "Optional[float]" = None
+#: Called as ``step_hook(label, seconds, returncode)`` after each git call, so a log can say which
+#: step was slow.
+step_hook = None
+
+_NO_WINDOW = 0x08000000
+
+
+def _kill_tree(proc: "subprocess.Popen") -> None:
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], check=False,
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        import signal
+
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
 def _git(
     agents_dir: Path,
     *args: str,
     capture: bool = False,
     config_args: "Optional[list[str]]" = None,
     env: "Optional[dict]" = None,
+    maintenance: bool = False,
 ):
+    """Run git in ``agents_dir``. Never waits on a terminal (standard input is closed), ends
+    the whole process tree at :data:`git_timeout`, and runs without auto-maintenance unless
+    ``maintenance`` (the explicit maintenance step)."""
+    import time
+
     run_env = {**os.environ, **env} if env else None
-    return subprocess.run(
-        ["git", *(config_args or []), "-C", str(agents_dir), *args],
-        capture_output=capture,
-        text=True,
-        check=False,
-        env=run_env,
-    )
+    command = ["git", *([] if maintenance else NO_MAINTENANCE), *(config_args or []),
+               "-C", str(agents_dir), *args]
+    options: dict = {"stdin": subprocess.DEVNULL, "env": run_env, "text": True}
+    if capture:
+        options.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if os.name == "nt":
+        options["creationflags"] = _NO_WINDOW
+    elif git_timeout is not None:
+        options["start_new_session"] = True  # its own group, so a timeout ends git's helpers too
+    started = time.monotonic()
+    proc = subprocess.Popen(command, **options)
+    try:
+        out, err = proc.communicate(timeout=git_timeout)
+        result = subprocess.CompletedProcess(command, proc.returncode, out, err)
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            proc.communicate(timeout=5)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            pass
+        result = subprocess.CompletedProcess(
+            command, 124, "", "git %s timed out after %ds" % (args[0] if args else "", git_timeout or 0))
+    if step_hook is not None:
+        step_hook("git " + (args[0] if args else ""), time.monotonic() - started, result.returncode)
+    return result
 
 
 def _has_origin(agents_dir: Path) -> bool:
@@ -1001,6 +1091,7 @@ def sync_agents(
     pull: bool = True,
     push: bool = True,
     dry_run: bool = False,
+    main: bool = True,
     logger=None,
 ) -> int:
     """Sync the agents store: copy a copy-mode project's ``.agents`` back into it,
@@ -1013,7 +1104,10 @@ def sync_agents(
     git path runs (``pull --rebase`` / commit / push) as a convenient default --
     with ``--remote`` on a non-git ``agents_dir``, ``git init`` + set ``origin``
     first, making first-time bootstrap a single command. Neither is required: a
-    store that never leaves the machine is a valid setup."""
+    store that never leaves the machine is a valid setup.
+
+    ``main=False`` syncs only the project's own branch worktree, not the agents dir's own
+    branch or ``hooks/sync`` (the caller already did, for another project of the same run)."""
     log = _Log(logger)
     agents_dir = Path(agents_dir).expanduser().resolve()
 
@@ -1053,6 +1147,12 @@ def sync_agents(
     # the store reaches other machines -- git, rsync, a cloud drive, nothing at
     # all -- is the user's choice. A hook takes it over entirely; the git path
     # below is only the bundled default.
+    if not main:
+        if branch_target is not None and not dry_run:
+            sync_worktree(branch_target[0], branch_target[1], message, pull=pull, push=push,
+                          logger=logger)
+        return 0
+
     hook_rc = _run_sync_hook(agents_dir, message=message, dry_run=dry_run, log=log)
     if hook_rc is not None:
         return hook_rc
@@ -1112,8 +1212,10 @@ def sync_agents(
 
         if push and _has_origin(agents_dir):
             log("git push -u origin HEAD")
-            res = _git(agents_dir, "push", "-u", "origin", "HEAD", capture=True,
-                       config_args=config_args, env=auth_env)
+            res = _push_retrying(
+                agents_dir, ("push", "-u", "origin", "HEAD"),
+                ("pull", "--rebase", "--autostash", "origin", "HEAD"),
+                config_args=config_args, auth_env=auth_env, log=log)
             if res.returncode != 0:
                 log("WARN: git push failed: %s", (res.stderr or "").strip())
     finally:

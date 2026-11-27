@@ -1,8 +1,15 @@
 #!/usr/bin/env sh
 # `turn-end` hook (declared in overlay.cfg): push this session's private-agents changes back to
-# the repo. For a symlinked project this just commits/pushes ~/.agents; for a copy-mode project
-# it copies .agents back into the store first. Never fails the session. A hook's standard output
-# is its answer, so what it has to say goes to standard error.
+# the repo. It records the request and starts the sync detached (lib/python/_bgsync.py), then
+# returns at once: a sync of a large store on a busy machine outlasts any deadline, and turns end
+# every minute. A sync already running takes the request into its next pass. For a symlinked
+# project the sync commits/pushes ~/.agents; for a copy-mode project it copies .agents back into
+# the store first. Never fails the session. A hook's standard output is its answer, so what it has
+# to say goes to standard error.
+#
+# Settings (environment, or `name = value` in ~/.agents/private-sync.cfg): background (1),
+# interval (30), git_timeout (120), stale (900), sweep_interval (300), maintenance_interval
+# (86400); see _bgsync.py.
 #
 # Env: AGENTS_HOME (default $HOME/.agents),
 # CLAUDE_PROJECT_DIR / AGENTS_PROJECT_ROOT (by hand: PWD),
@@ -37,7 +44,7 @@ if [ -f "$_DG_AUTH" ]; then
     _agents_git_auth
 fi
 
-"$_DG_PY" -I "$_DG_HERE/run_link.py" sync "$PROJECT_DIR" "$AGENTS_DIR" "sync: ${PROJECT_DIR##*/} session" >&2 \
+"$_DG_PY" -I "$_DG_HERE/run_link.py" turn-end "$PROJECT_DIR" "$AGENTS_DIR" "sync: ${PROJECT_DIR##*/} session" >&2 \
     || echo "private-sync: sync failed" >&2
 
 exit 0

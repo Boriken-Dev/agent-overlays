@@ -35,6 +35,11 @@ def sync_agents(agents, *, message="", project_dir=None, **kw):
 '''
 
 
+#: The hook's sync runs here, before it returns, so a test reads what it did.
+INLINE = {"PRIVATE_SYNC_BACKGROUND": "0", "PRIVATE_SYNC_INTERVAL": "0", "PRIVATE_SYNC_SWEEP_INTERVAL": "0",
+          "PRIVATE_SYNC_MAINTENANCE_INTERVAL": "0"}
+
+
 def _manifest() -> dict:
     try:
         import tomllib
@@ -78,6 +83,7 @@ def _overlay_copy(where: Path) -> Path:
     """The overlay's hooks and library, with the library replaced by the recorder."""
     shutil.copytree(str(ROOT / "hooks"), str(where / "hooks"))
     (where / "lib" / "python").mkdir(parents=True)
+    shutil.copy(str(ROOT / "lib" / "python" / "_bgsync.py"), str(where / "lib" / "python" / "_bgsync.py"))
     (where / "lib" / "python" / "_link.py").write_text(LINK_STUB, encoding="utf-8")
     return where
 
@@ -90,7 +96,8 @@ def _run_script(tmp_path, script, payload_cwd, **extra):
     overlay = _overlay_copy(tmp_path / "overlay") if not (tmp_path / "overlay").exists() else tmp_path / "overlay"
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PROJECT_DIR", "AGENTS_PROJECT_ROOT")}
     env.update(PATH=str(bin_dir) + os.pathsep + os.environ["PATH"], AGENTS_HOME=str(_agents_repo(tmp_path)),
-               AOS_HOOK_EVENT="session-start", AGENTS_PYTHON=sys.executable, LINK_LOG=str(log), **extra)
+               AOS_HOOK_EVENT="session-start", AGENTS_PYTHON=sys.executable, LINK_LOG=str(log), **INLINE)
+    env.update(extra)
     payload = json.dumps({"event": "session-start", "harness": "claude-code", "cwd": str(payload_cwd)})
     done = subprocess.run([SH, str(overlay / "hooks" / script)], input=payload.encode(), env=env,
                           capture_output=True, cwd=str(tmp_path))
@@ -101,7 +108,7 @@ def _run_script(tmp_path, script, payload_cwd, **extra):
 
 @needs_sh
 @pytest.mark.parametrize("script,expect", [
-    ("private-sync-start.sh", ["git -C", "link-project"]),
+    ("private-sync-start.sh", ["-C", "link-project"]),
     ("private-sync-stop.sh", ["sync-project"]),
 ])
 def test_the_project_is_the_one_the_harness_names(tmp_path, script, expect):
@@ -162,7 +169,7 @@ def test_run_by_hand_the_scripts_use_the_current_directory(tmp_path):
     here.mkdir()
     env = {k: v for k, v in os.environ.items() if k not in ("AOS_HOOK_EVENT", "CLAUDE_PROJECT_DIR", "AGENTS_PROJECT_ROOT")}
     env.update(PATH=str(bin_dir) + os.pathsep + os.environ["PATH"], AGENTS_HOME=str(_agents_repo(tmp_path)),
-               AGENTS_PYTHON=sys.executable, LINK_LOG=str(log))
+               AGENTS_PYTHON=sys.executable, LINK_LOG=str(log), **INLINE)
     subprocess.run([SH, str(overlay / "hooks" / "private-sync-stop.sh")], env=env, stdin=subprocess.DEVNULL,
                    capture_output=True, cwd=str(here), check=True)
     assert "sync-project %s" % here in log.read_text(encoding="utf-8")
@@ -187,7 +194,7 @@ def test_dotagents_runs_them_once_allowed_and_not_before(tmp_path, monkeypatch):
     (project / ".agents").mkdir(parents=True)
     monkeypatch.setenv("AGENTS_HOME", str(store))
     environ = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"], AGENTS_HOME=str(store),
-                   AGENTS_PROJECT_ROOT=str(project), LINK_LOG=str(log))
+                   AGENTS_PROJECT_ROOT=str(project), LINK_LOG=str(log), **INLINE)
     scope = _hook_dispatch.scope_for("user", store)
     overlay = next(o for o in scope.installed_overlays if o.name == "private-sync")
     native = json.dumps({"session_id": "s", "cwd": str(project / "src"), "source": "startup"}).encode()
@@ -240,7 +247,7 @@ def test_under_codex_with_an_agent_chosen_cwd_nothing_is_synced_end_to_end(tmp_p
         del os.environ["AGENTS_HOME"]
     forwarder = codex_home / "hooks" / "overlay_hook.py"
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PROJECT_DIR", "AGENTS_PROJECT_ROOT")}
-    env.update(PATH=str(bin_dir) + os.pathsep + os.environ["PATH"], AGENTS_HOME=str(store), LINK_LOG=str(log))
+    env.update(PATH=str(bin_dir) + os.pathsep + os.environ["PATH"], AGENTS_HOME=str(store), LINK_LOG=str(log), **INLINE)
     payload = json.dumps({"session_id": "s", "cwd": str(other / "src")}).encode()
 
     def stop(**extra):

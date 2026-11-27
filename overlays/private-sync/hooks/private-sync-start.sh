@@ -48,7 +48,8 @@ fi
 
 # 1. Ensure the private repo is present and current.
 if [ -d "$AGENTS_DIR/.git" ]; then
-    git -C "$AGENTS_DIR" pull --rebase --autostash --quiet \
+    # No auto-maintenance in a pull: it repacks a large store for minutes (see _bgsync.py).
+    git -c gc.auto=0 -c maintenance.auto=false -C "$AGENTS_DIR" pull --rebase --autostash --quiet \
         || echo "private-sync: pull failed (offline?), using local copy" >&2
 elif [ -n "${AGENTS_REMOTE:-}" ]; then
     echo "private-sync: cloning private agents repo into $AGENTS_DIR" >&2

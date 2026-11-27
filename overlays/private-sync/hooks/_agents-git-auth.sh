@@ -72,6 +72,6 @@ _agents_git_auth() {
     GIT_CONFIG_GLOBAL="$_dg_cfg"
     GIT_CONFIG_SYSTEM=/dev/null
     export GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
-    echo "private-sync: github.com git is rewritten to an in-session proxy; bypassing it for token auth"
+    echo "private-sync: github.com git is rewritten to an in-session proxy; bypassing it for token auth" >&2
     unset _dg_helper _dg_rewrite _dg_name _dg_email _dg_cfg _dg_ca
 }
