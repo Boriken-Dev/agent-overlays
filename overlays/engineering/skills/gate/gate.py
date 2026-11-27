@@ -1,9 +1,10 @@
 """`gate` -- the checks a branch passes before it is merged.
 
-    gate run   WORKTREE [--step NAME]... [--out DIR] [--fail-fast]
-    gate wsl   WORKTREE [--out DIR]
-    gate merge BRANCH [-C DIR] [--no-push] [--out DIR]
-    gate lock  LABEL -- CMD...
+    gate run      WORKTREE [--step NAME]... [--out DIR] [--fail-fast] [--full]
+    gate wsl      WORKTREE [--out DIR] [--full]
+    gate merge    BRANCH [-C DIR] [--no-push] [--out DIR] [--full]
+    gate affected WORKTREE [--step NAME] [--args]
+    gate lock     LABEL -- CMD...
 
 `run` refuses a tree in the middle of a rebase, a merge or a cherry-pick, or with unmerged paths. It takes the
 machine-wide gate lock (waiting for it), then runs each step of `[gate] steps` through `summarize-run`, each
@@ -11,6 +12,9 @@ under `build-slot` when the step says `slot = true`, and prints `PASS name`, `FA
 `when` globs runs only when a changed path (against REMOTE/MAIN) matches one. The files in `[gate] restore` are
 checked out again afterwards. Every step's full log and verdict go to `--out` (default: a `gate_NAME` directory
 under the temporary directory). Exit 1 when a step failed.
+
+A cargo step with `affected = true` runs only the workspace packages the changes reach (`-p` for each, in place of
+`--workspace`), and is `SKIP` when none is; `--full` ignores that. `affected` prints the same choice and its reasons.
 
 `wsl` runs `[gate] wsl_steps` in a Linux distribution on a `git archive` of HEAD, with the target directory kept
 between runs and cleared (then `fstrim`) once it passes `[wsl] target_max_gb`.
@@ -87,6 +91,10 @@ class Gate(LoggingArgs, Cli):
         "build-slot seconds to wait for a slot."
         ("--max-wait",)
 
+        full: bool = False
+        "Ignore `affected`: run every step on the whole workspace (a merge batch, a deploy, a release)."
+        ("--full",)
+
         def slot_options(self) -> dict:
             options = {"max_wait": self.max_wait}
             if self.limit:
@@ -113,7 +121,8 @@ class Gate(LoggingArgs, Cli):
         def __call__(self) -> int:
             return _guarded(lambda: 0 if _gate.run_gate(
                 Path(self.worktree), only=list(self.step), out=Path(self.out) if self.out else None,
-                fail_fast=self.fail_fast, lock_every=self.lock_every, slot_options=self.slot_options()) else 1)
+                fail_fast=self.fail_fast, lock_every=self.lock_every, slot_options=self.slot_options(),
+                full=self.full) else 1)
 
     class Wsl(_Common):
         """Run the Linux leg: the project's wsl_steps on an archive of HEAD."""
@@ -127,7 +136,7 @@ class Gate(LoggingArgs, Cli):
         def __call__(self) -> int:
             return _guarded(lambda: 0 if _gate.run_wsl(
                 Path(self.worktree), out=Path(self.out) if self.out else None, lock_every=self.lock_every,
-                slot_options=self.slot_options()) else 1)
+                slot_options=self.slot_options(), full=self.full) else 1)
 
     class Merge(_Common):
         """Fast-forward main to a branch, run both legs, push through repo-guard."""
@@ -152,7 +161,27 @@ class Gate(LoggingArgs, Cli):
                 return 2
             return _guarded(lambda: 0 if _gate.merge_branch(
                 Path(self.repo), self.branch, push=not self.no_push, out=Path(self.out) if self.out else None,
-                lock_every=self.lock_every, slot_options=self.slot_options()) else 1)
+                lock_every=self.lock_every, slot_options=self.slot_options(), full=self.full) else 1)
+
+    class Affected(Cmd):
+        """Say which workspace packages the branch's changes reach, without running anything."""
+
+        _parsername_ = "affected"
+
+        worktree: Path = Path(".")
+        "The worktree to look at (default: the current directory)."
+        ("worktree",)
+
+        step: str = ""
+        "Apply this step's `full_when` and `slow` (a step of `steps` or `wsl_steps`)."
+        ("--step",)
+
+        args: bool = False
+        "Print only the cargo arguments (`-p a -p b`, `--workspace` for all, nothing for none)."
+        ("--args",)
+
+        def __call__(self) -> int:
+            return _guarded(lambda: _gate.affected_report(Path(self.worktree), self.step, args_only=self.args) or 0)
 
     class Lock(Cmd):
         """Run a command while holding the gate lock."""
@@ -186,7 +215,7 @@ class Gate(LoggingArgs, Cli):
                     return subprocess.run(cmd).returncode
             return _guarded(hold)
 
-    _subcommands_ = [Run, Wsl, Merge, Lock]
+    _subcommands_ = [Run, Wsl, Merge, Affected, Lock]
 
 
 if __name__ == "__main__":

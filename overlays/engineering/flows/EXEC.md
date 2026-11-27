@@ -68,6 +68,16 @@ public-facing text runs `leak-check <repo>`
 - Performance claims need baseline and final evidence. Unrun checks are
   "implemented, unverified", never complete.
 
+## Gates
+
+- A branch's gate runs only the affected packages' tests: the packages that changed and
+  those that depend on them (`affected = true` on a gate step, `gate affected` to see
+  the list).
+- Slow live, load or timing tests run only when their own code changed (`slow` on the
+  step).
+- A full run (`gate run --full`, `gate wsl --full`) happens once per merge batch,
+  deploy or release, not per branch.
+
 ## Handoff
 
 Reconcile Progress with the working tree: existing code cannot remain `[ ]`; mark it

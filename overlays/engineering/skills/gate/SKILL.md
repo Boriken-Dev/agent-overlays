@@ -37,3 +37,19 @@ When the overlay's `[scripts]` launcher is on `PATH`, invoke `gate` directly.
 - **Copying the configuration.** A fresh worktree has no `.agents/`, so copy `.agents/agent-tools.toml` into it
   before gating. Copy it again after the project's file changes, because a running gate reads the copy it started
   with.
+
+## Affected tests
+
+A branch's gate runs only the tests it can change. Give a cargo step `affected = true` in `[gate]` and `gate run` and
+`gate wsl` test only the workspace packages whose files changed against REMOTE/MAIN plus every package that depends on
+them, transitively: `--workspace` becomes `-p NAME` for each. The step prints the package list and which file or
+dependency put each one there, and is `SKIP` when none is reached. A change to `Cargo.toml`, `Cargo.lock`, the toolchain
+files, `.cargo/` or a path in the step's `full_when` runs the whole workspace.
+
+- **Slow tests.** `slow = [{ package = "x", skip = ["live_", "load_"] }]` on a `cargo test` step passes each filter
+  as `--skip` after `--` and so leaves those tests out unless package `x` itself changed (not only a dependency of it).
+  Name long live, load and timing tests there.
+- **Full run.** `gate run --full`, `gate wsl --full` and `gate merge --full` ignore `affected` and `slow`. A full run
+  happens once per merge batch, deploy or release, not per branch.
+- **A script's list.** `gate affected WORKTREE [--step NAME] --args` prints `-p a -p b` (`--workspace` for all, nothing
+  for none) for a manual run on another host; without `--args` it prints the reasons.

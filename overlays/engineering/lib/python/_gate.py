@@ -23,6 +23,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
+import _affected as aff
 import _slots
 import agent_tools as at
 
@@ -101,6 +102,51 @@ def wanted(step: dict[str, Any], changed: list[str] | None) -> bool:
         return True
     regexes = [glob_regex(p) for p in patterns]
     return any(rx.match(path) for path in changed for rx in regexes)
+
+
+# --- affected packages --------------------------------------------------------------------------------------
+
+
+def affected_selection(step: dict[str, Any], worktree: Path, changed: list[str] | None, cache: dict[str, Any],
+                       ) -> tuple["aff.Selection", list[str], list[str]]:
+    """(the selection, the `--skip` filters of the `slow` entries, the report notes about them) for a step."""
+    cwd = worktree / step["cwd"] if step.get("cwd") else worktree
+    key = str(cwd)
+    if key not in cache:
+        try:
+            meta = aff.load_metadata(cwd)
+        except OSError as error:
+            raise aff.AffectedError(f"cargo is not available: {error}") from error
+        top = Path(git(worktree, "rev-parse", "--show-toplevel"))
+        cache[key] = (aff.packages_from_metadata(meta, top), aff.workspace_root_rel(meta, top))
+    packages, root_rel = cache[key]
+    regexes = [glob_regex(p) for p in aff.full_patterns(root_rel, step.get("full_when") or [])]
+    _, excluded = aff.split_excluded(aff.cargo_argv(step["run"]))
+    selection = aff.select(packages, changed, lambda path: any(rx.match(path) for rx in regexes), excluded)
+    skips, notes = aff.slow_skips(step.get("slow") or [], {p.name for p in packages}, selection)
+    return selection, skips, notes
+
+
+def plan_affected(step: dict[str, Any], worktree: Path, changed: list[str] | None, *, full: bool,
+                  cache: dict[str, Any], out: Path, say: Callable[[str], None], label: str | None = None,
+                  ) -> dict[str, Any] | None:
+    """The step as it should run, or None when no package is affected. A step without `affected` (or under `--full`)
+    is returned as it is. The choice and its reasons are said and written to `OUT/NAME.affected`."""
+    if not step.get("affected") or full:
+        return step
+    try:
+        selection, skips, notes = affected_selection(step, worktree, changed, cache)
+        planned = step
+        if not selection.full and selection.packages:
+            planned = {**step, "run": aff.rewrite(aff.cargo_argv(step["run"]), selection.packages, skips)}
+    except aff.AffectedError as error:
+        raise GateError(f"step {step['name']}: {error}") from error
+    args = [x for n in selection.packages for x in ("-p", n)]
+    lines = aff.report(label or step["name"], selection, notes, args)
+    for line in lines:
+        say(line)
+    (out / f"{step['name']}.affected").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="")
+    return None if not selection.full and not selection.packages else planned
 
 
 # --- running one step ----------------------------------------------------------------------------------------
@@ -197,9 +243,9 @@ def step_list(config: at.Config, key: str, only: list[str]) -> list[dict[str, An
 def run_gate(worktree: Path, *, only: list[str] | None = None, out: Path | None = None, fail_fast: bool = False,
              lock: _slots.GateLock | None = None, lock_every: float = _slots.DEFAULT_LOCK_EVERY,
              slot_options: dict[str, Any] | None = None, say: Callable[[str], None] = print,
-             slot: "_slots.Slot | None" = None) -> bool:
+             slot: "_slots.Slot | None" = None, full: bool = False) -> bool:
     """Run the project's steps in `worktree`; True when none failed. Prints `PASS name`, `FAIL name` or
-    `SKIP name` per step. Takes the gate lock unless the caller already holds it."""
+    `SKIP name` per step. Takes the gate lock unless the caller already holds it. `full` ignores `affected`."""
     worktree = worktree.resolve()
     config = at.load(worktree)
     steps = step_list(config, "steps", only or [])
@@ -217,12 +263,17 @@ def run_gate(worktree: Path, *, only: list[str] | None = None, out: Path | None 
         lock.acquire()
     slot = slot or _slots.Slot(_slots.SlotConfig.from_config(config))
     ok = True
+    cache: dict[str, Any] = {}
     try:
         for step in steps:
             if not wanted(step, changed):
                 say(f"SKIP {step['name']} (no changed path matches {', '.join(step['when'])})")
                 continue
-            passed = run_step(step, worktree, out, slot if step.get("slot") else None, slot_options or {})
+            planned = plan_affected(step, worktree, changed, full=full, cache=cache, out=out, say=say)
+            if planned is None:
+                say(f"SKIP {step['name']} (no workspace package is affected)")
+                continue
+            passed = run_step(planned, worktree, out, slot if step.get("slot") else None, slot_options or {})
             say(f"{'PASS' if passed else 'FAIL'} {step['name']}" + ("" if passed else f"  (see {out / (step['name'] + '.verdict')})"))
             if not passed:
                 ok = False
@@ -299,11 +350,13 @@ def wsl_script(config: at.Config, name: str, steps: list[dict[str, Any]], archiv
 
 def run_wsl(worktree: Path, *, out: Path | None = None, lock: _slots.GateLock | None = None,
             lock_every: float = _slots.DEFAULT_LOCK_EVERY, slot: "_slots.Slot | None" = None,
-            slot_options: dict[str, Any] | None = None, say: Callable[[str], None] = print) -> bool:
+            slot_options: dict[str, Any] | None = None, say: Callable[[str], None] = print,
+            full: bool = False) -> bool:
+    """The Linux leg. `full` ignores `affected`."""
     worktree = worktree.resolve()
     config = at.load(worktree)
-    steps = config.get("gate", "wsl_steps", [])
-    if not steps:
+    all_steps = config.get("gate", "wsl_steps", [])
+    if not all_steps:
         raise GateError(f"{config.where('gate', 'wsl_steps')}: [gate] wsl_steps is required")
     prefix = wsl_prefix(config)
     problem = unfinished(worktree)
@@ -311,6 +364,16 @@ def run_wsl(worktree: Path, *, out: Path | None = None, lock: _slots.GateLock | 
         raise GateError(f"{worktree} is {problem}: refusing to pass a partial tree")
     out = out or default_out(worktree)
     out.mkdir(parents=True, exist_ok=True)
+    changed, cache, steps = changed_paths(worktree, config), {}, []
+    for step in all_steps:
+        planned = plan_affected(step, worktree, changed, full=full, cache=cache, out=out, say=say,
+                                label=f"wsl:{step['name']}")
+        if planned is None:
+            say(f"SKIP wsl:{step['name']} (no workspace package is affected)")
+        else:
+            steps.append(planned)
+    if not steps:
+        return True
     archive = out / "src.tar"
     git(worktree, "archive", "--format=tar", "-o", str(archive), "HEAD")
     script = out / "wsl.sh"
@@ -364,7 +427,7 @@ def repo_guard_command() -> list[str]:
 
 def merge_branch(repo: Path, branch: str, *, push: bool = True, out: Path | None = None,
                  lock_every: float = _slots.DEFAULT_LOCK_EVERY, slot_options: dict[str, Any] | None = None,
-                 say: Callable[[str], None] = print, guard_command: Callable[[], list[str]] = repo_guard_command) -> bool:
+                 say: Callable[[str], None] = print, full: bool = False, guard_command: Callable[[], list[str]] = repo_guard_command) -> bool:
     """Fast-forward main to `branch`, run the gate and the Linux leg, and push through `repo-guard push`.
     Refuses a branch that is not ahead of main or whose commits carry agent attribution; on a failed check main
     stays advanced locally and the report says how to undo that."""
@@ -386,9 +449,9 @@ def merge_branch(repo: Path, branch: str, *, push: bool = True, out: Path | None
     lock = lock_for(config, f"{repo.name}-merge", lock_every)
     lock.acquire()
     try:
-        ok = run_gate(repo, out=out, lock=lock, slot_options=slot_options, say=say, fail_fast=True)
+        ok = run_gate(repo, out=out, lock=lock, slot_options=slot_options, say=say, fail_fast=True, full=full)
         if ok and config.get("gate", "wsl_steps"):
-            ok = run_wsl(repo, out=out, lock=lock, slot_options=slot_options, say=say)
+            ok = run_wsl(repo, out=out, lock=lock, slot_options=slot_options, say=say, full=full)
     finally:
         lock.release()
     if not ok:
@@ -399,3 +462,35 @@ def merge_branch(repo: Path, branch: str, *, push: bool = True, out: Path | None
         return True
     done = subprocess.run([*guard_command(), "push", "-C", str(repo)])
     return done.returncode == 0
+
+
+# --- gate affected -------------------------------------------------------------------------------------------
+
+
+def affected_report(worktree: Path, step_name: str = "", *, args_only: bool = False,
+                    say: Callable[[str], None] = print) -> None:
+    """Say which packages a branch's changes reach, without running anything. With `step_name`, that step's
+    `full_when` and `slow` apply (it may be in `steps` or `wsl_steps`). `args_only` prints just the cargo
+    arguments: `-p a -p b`, `--workspace` for everything, nothing for no package (for scripts)."""
+    worktree = worktree.resolve()
+    config = at.load(worktree)
+    step: dict[str, Any] = {"name": step_name or "workspace", "run": "cargo test --workspace"}
+    if step_name:
+        found = [s for key in ("steps", "wsl_steps") for s in config.get("gate", key, []) if s["name"] == step_name]
+        if not found:
+            raise GateError(f"no step named {step_name} in [gate] steps or wsl_steps")
+        step = found[0]
+    try:
+        selection, skips, notes = affected_selection(step, worktree, changed_paths(worktree, config), {})
+    except aff.AffectedError as error:
+        raise GateError(str(error)) from error
+    args = [x for n in selection.packages for x in ("-p", n)]
+    if args_only:
+        text = "--workspace" if selection.full else " ".join(args)
+        if skips and not selection.full and args:
+            text += " -- " + " ".join(x for f in skips for x in ("--skip", f))
+        if text:
+            say(text)
+        return
+    for line in aff.report(step["name"], selection, notes, args):
+        say(line)

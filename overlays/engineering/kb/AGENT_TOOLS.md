@@ -59,7 +59,7 @@ rules = [
 root = "**/wt/*"     # limit `worktrees` to worktrees whose path matches
 ```
 
-A step is `name`, `run`, and optionally `when` (globs), `env`, `cwd` (relative to the worktree) and `slot` (default
+A step is `name`, `run`, and optionally `when` (globs), `env`, `cwd` (relative to the worktree), `affected`, `full_when`, `slow` (see "Affected steps") and `slot` (default
 false). `run` is a list (an argv) or a string split like a shell command line, so write paths with forward slashes and
 use `sh -c '...'` for a pipeline; in `wsl_steps` a string is a bash line, run as is. `{worktree}` in `run` or `env` is
 replaced by the worktree's path (in `wsl_steps`, by the unpacked clone's). Globs: `**` crosses directories, `*` and `?`
@@ -106,7 +106,7 @@ this machine. With no command it only waits for a slot.
 - The state files are those of earlier `build_slot.py` scripts, so old and new callers share one limit and one gate and
   may run at the same time.
 
-### `gate run WORKTREE [--step NAME]... [--out DIR] [--fail-fast]`
+### `gate run WORKTREE [--step NAME]... [--out DIR] [--fail-fast] [--full]`
 
 Runs `[gate] steps`. Refuses a tree in the middle of a rebase, merge or cherry-pick or with unmerged paths. Takes the
 gate lock (`[gate] lock`, a `mkdir` lock with a `holder` file inside; it waits, naming the holder), runs each step through
@@ -115,19 +115,44 @@ gate lock (`[gate] lock`, a `mkdir` lock with a `holder` file inside; it waits, 
 matches one of its globs (every step runs when that ref does not exist). Each step's log and verdict are in `--out`
 (default `gate_NAME` under the temporary directory). Exit 1 when a step failed.
 
-### `gate wsl WORKTREE [--out DIR]`
+### `gate wsl WORKTREE [--out DIR] [--full]`
 
 Runs `[gate] wsl_steps` in a Linux distribution on a `git archive` of HEAD, under the same lock: the archive is unpacked
 into `[wsl] home`/`gate_NAME`, each step runs there with `CARGO_TARGET_DIR` set beside it and `CARGO_BUILD_JOBS` from
 `[wsl] jobs`, and `PASS wsl:name` or `FAIL wsl:name` is printed. The target is kept between runs and cleared (then
 `fstrim` as root) once it passes `[wsl] target_max_gb`; the clone is removed.
 
-### `gate merge BRANCH [-C DIR] [--no-push] [--out DIR]`
+### `gate merge BRANCH [-C DIR] [--no-push] [--out DIR] [--full]`
 
 In a repository on its main branch: refuses a branch that is not a fast-forward of main or whose commits carry agent
 attribution, fast-forwards main, runs `run` and `wsl` under one lock and, only if all passed, pushes through
 `repo-guard push`. After a failed check main stays advanced locally and the output names the `git reset --hard` that
 undoes it.
+
+### Affected steps
+
+`affected = true` on a step of `steps` or `wsl_steps` that runs one cargo command (`cargo test --workspace ...`,
+`cargo clippy --workspace ...`) makes `gate run` and `gate wsl` run it on the packages the branch reaches. The
+changed paths are those against `REMOTE/MAIN` (every step runs whole when that ref does not exist); the workspace comes
+from `cargo metadata --format-version 1 --no-deps`. A package is reached when a changed file is under its directory
+or when it depends on a reached package (normal, dev or build dependency, transitively). The step then runs with
+`-p NAME` for each in place of `--workspace`; its other arguments stay, and `--exclude NAME` removes a package from
+the set. The step must not name `-p` itself.
+
+| Key | Meaning |
+| --- | --- |
+| `affected` | `true` to select packages |
+| `full_when` | globs (like `when`) that mean the whole workspace; `Cargo.toml`, `Cargo.lock`, `rust-toolchain[.toml]` and `.cargo/**` of the workspace always do |
+| `slow` | `[{ package = "x", skip = "live_" }]`, `skip` a string or a list: libtest name filters passed as `--skip` after `--` (a `cargo test` step) unless package `x` itself has a changed file; a whole-workspace run keeps them |
+
+With no package reached the step is `SKIP`. The package list and the file or dependency behind each package are printed
+and written to `OUT/NAME.affected`. `--full` on `gate run`, `gate wsl` and `gate merge` ignores `affected` and `slow`.
+
+### `gate affected WORKTREE [--step NAME] [--args]`
+
+Prints the same selection and reasons without running a step; `--step` applies that step's `full_when` and `slow`.
+`--args` prints only the cargo arguments, for a run on another host: `-p a -p b` (then `-- --skip X` for the
+filters), `--workspace` when the whole workspace is reached, nothing when no package is.
 
 ### `gate lock LABEL -- CMD...`
 
