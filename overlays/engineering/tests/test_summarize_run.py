@@ -88,3 +88,16 @@ def test_a_timeout_stops_the_command_and_fails(tmp_path, capsys):
 def test_no_command_is_a_usage_error(tmp_path, capsys):
     with pytest.raises(SystemExit, match="no command given"):
         run(capsys, cwd=tmp_path)
+
+
+def test_the_child_keeps_the_callers_git_config_environment(tmp_path, capsys, monkeypatch):
+    """A spawned git must see the same global config the caller's git does."""
+    cfg = tmp_path / "gitconfig"
+    cfg.write_text("[user]\n\tname = Env Probe\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(cfg))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    code, out = run(capsys, "--output", "x.log", "--", "git", "config", "--global", "user.name",
+                    cwd=tmp_path)
+    assert code == 0, out
+    assert (tmp_path / "x.log").read_text(encoding="utf-8").strip() == "Env Probe"
