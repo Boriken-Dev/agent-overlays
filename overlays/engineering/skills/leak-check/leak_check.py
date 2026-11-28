@@ -115,6 +115,11 @@ Exit codes
     3  CANNOT CHECK   the tree could not be enumerated, held no readable
                       file, or is the agent store
 
+``--gate`` also fails (1) a scan in which a class of pattern did not run, so a
+missing pattern file or plans directory cannot read as PASS. ``--install-hook
+pre-push`` (or ``pre-commit``) writes a git hook running the gate; skip it with
+``git push --no-verify`` or ``AGENTS_LEAK_CHECK_GATE=off``, which the hook logs.
+
 Judge by the exit code. Do not pipe the output through ``tail``: the pipe
 returns tail's status and the verdict is lost.
 
@@ -403,6 +408,20 @@ def alternation(names: set[str]) -> re.Pattern | None:
 def _git(args: list[str], **kw) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], capture_output=True,
                           stdin=subprocess.DEVNULL, **kw)
+
+
+#: The git hooks `--install-hook` can write, and the line that marks one as its own.
+HOOK_NAMES = ("pre-push", "pre-commit")
+HOOK_MARK = "# leak-check gate (written by `leak-check --install-hook`)"
+#: Set to `off` in the environment of a git command to skip an installed hook; the hook says so.
+HOOK_OFF_ENV = "AGENTS_LEAK_CHECK_GATE"
+
+
+def _hook_command(top: Path) -> str:
+    quote = lambda text: '"%s"' % text.replace('"', '\\"')
+    return "%s %s --gate %s" % (quote(Path(sys.executable).as_posix()),
+                                quote(Path(__file__).resolve().as_posix()),
+                                quote(top.as_posix()))
 
 
 def is_git_worktree(repo: Path) -> bool:
@@ -850,6 +869,17 @@ class LeakCheck(LoggingArgs, Cmd):
     "Scan only commit messages, skipping the tree."
     ("--commits-only",)
 
+    gate: bool = False
+    ("Make the verdict binding: a scan in which a class of pattern did not run (INCOMPLETE) "
+     "fails, exit 1, instead of passing.")
+    ("--gate",)
+
+    install_hook: str = ""
+    ("Write a git hook (`pre-push` or `pre-commit`) that runs this scan with --gate and "
+     "blocks the git operation on a failure. An existing hook that this did not write "
+     "is never replaced.")
+    ("--install-hook",)
+
     full: bool = False
     ("Check every commit message for private-note patterns, not only the commits "
      "not yet pushed (trailers are checked in all of them either way).")
@@ -857,6 +887,8 @@ class LeakCheck(LoggingArgs, Cmd):
 
     def __call__(self) -> int:
         repo = Path(self.repo).resolve()
+        if self.install_hook:
+            return self._install_hook(repo)
         print("repo:     %s" % repo)
         refusal = store_refusal(repo)
         if refusal:
@@ -995,7 +1027,50 @@ class LeakCheck(LoggingArgs, Cmd):
         if total:
             print("\nFAIL (%d hits)%s" % (total, suffix))
             return EXIT_HITS
+        if empty and self.gate:
+            print("\nFAIL (gate: a class of pattern did not run)%s" % suffix)
+            return EXIT_HITS
         print("\nPASS%s" % suffix)
+        return EXIT_OK
+
+    def _install_hook(self, repo: Path) -> int:
+        if self.install_hook not in HOOK_NAMES:
+            print("error: --install-hook takes one of: %s" % ", ".join(HOOK_NAMES),
+                  file=sys.stderr)
+            return EXIT_USAGE
+        found = _git(["-C", str(repo), "rev-parse", "--show-toplevel"])
+        if found.returncode:
+            print("error: %s is not inside a git work tree" % repo, file=sys.stderr)
+            return EXIT_USAGE
+        top = Path(found.stdout.decode("utf-8", "replace").strip())
+        path_out = _git(["-C", str(top), "rev-parse", "--path-format=absolute",
+                         "--git-path", "hooks/" + self.install_hook])
+        if path_out.returncode:
+            print("error: git could not name the hooks directory", file=sys.stderr)
+            return EXIT_USAGE
+        hook = Path(path_out.stdout.decode("utf-8", "replace").strip())
+        if hook.exists() and HOOK_MARK not in hook.read_text(encoding="utf-8", errors="replace"):
+            print("error: %s exists and was not written by leak-check; add the command "
+                  "below to it yourself, or remove it:\n  %s"
+                  % (hook, _hook_command(top)), file=sys.stderr)
+            return EXIT_USAGE
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        body = "\n".join([
+            "#!/bin/sh",
+            HOOK_MARK,
+            "# Remove this file to drop the gate. `git %s --no-verify` skips it once." % (
+                "push" if self.install_hook == "pre-push" else "commit"),
+            'if [ "$%s" = off ]; then' % HOOK_OFF_ENV,
+            '  echo "leak-check: gate skipped (%s=off)" >&2' % HOOK_OFF_ENV,
+            "  exit 0",
+            "fi",
+            "exec " + _hook_command(top),
+            ""])
+        with open(hook, "w", encoding="utf-8", newline="") as handle:
+            handle.write(body)
+        if os.name != "nt":
+            hook.chmod(hook.stat().st_mode | 0o111)
+        print("hook:     %s runs `leak-check --gate`" % hook)
         return EXIT_OK
 
     def _optout(self, repo: Path) -> tuple[str, str, list[str]]:

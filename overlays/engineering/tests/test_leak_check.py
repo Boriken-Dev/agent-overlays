@@ -834,3 +834,45 @@ class AgentsPathsRule(Base):
         write(crate / NOTES / leak_check.EXEMPTIONS_NAME, "[agents_paths]\nallowed = []\n")
         code, out = run(str(crate), "--plans", str(self.empty_plans()), stderr=True)
         self.assertEqual(code, leak_check.EXIT_USAGE, out)
+
+
+class Gate(Base):
+    def test_gate_fails_a_verdict_with_a_class_that_did_not_run(self) -> None:
+        crate = self.repo(("src/lib.rs", "// nothing private here\n"))
+        code, out = self.scan(crate)  # no plan basenames: INCOMPLETE, advisory
+        self.assertEqual(code, leak_check.EXIT_OK, out)
+        code, out = self.scan(crate, "--gate")
+        self.assertEqual(code, leak_check.EXIT_HITS, out)
+        self.assertIn("FAIL", out.strip().splitlines()[-1])
+        self.assertIn("gate", out.strip().splitlines()[-1])
+
+    def test_gate_passes_a_complete_clean_scan(self) -> None:
+        write(self.root / NOTES / "plans/remote_engine.md", "x\n")
+        crate = self.repo(("src/lib.rs", "// nothing private here\n"))
+        code, out = run(str(crate), "--gate")
+        self.assertEqual(code, leak_check.EXIT_OK, out)
+
+    def test_install_hook_writes_a_pre_push_hook_that_runs_the_gate(self) -> None:
+        crate = self.repo(("src/lib.rs", "// clean\n"))
+        code, out = run(str(crate), "--install-hook", "pre-push")
+        self.assertEqual(code, leak_check.EXIT_OK, out)
+        hook = crate / ".git" / "hooks" / "pre-push"
+        text = hook.read_text(encoding="utf-8")
+        self.assertIn("--gate", text)
+        self.assertIn("AGENTS_LEAK_CHECK_GATE", text)
+        self.assertNotIn("\r", text)
+        # Running it again replaces its own hook.
+        self.assertEqual(run(str(crate), "--install-hook", "pre-push")[0], leak_check.EXIT_OK)
+
+    def test_install_hook_never_overwrites_a_hook_it_did_not_write(self) -> None:
+        crate = self.repo(("src/lib.rs", "// clean\n"))
+        hook = crate / ".git" / "hooks" / "pre-commit"
+        write(hook, "#!/bin/sh\necho mine\n")
+        code, out = run(str(crate), "--install-hook", "pre-commit", stderr=True)
+        self.assertEqual(code, leak_check.EXIT_USAGE, out)
+        self.assertEqual(hook.read_text(encoding="utf-8"), "#!/bin/sh\necho mine\n")
+
+    def test_install_hook_names_only_git_hooks_it_supports(self) -> None:
+        crate = self.repo(("src/lib.rs", "// clean\n"))
+        self.assertEqual(run(str(crate), "--install-hook", "post-merge", stderr=True)[0],
+                         leak_check.EXIT_USAGE)

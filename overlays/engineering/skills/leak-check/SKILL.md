@@ -28,3 +28,10 @@ $AGENTS_PYTHON -I $ENGINEERING_OVERLAY_ROOT/skills/leak-check/leak_check_history
 ```
 
 Exit 0: no repository has hits of its own. 1: at least one has. 3: no pattern file.
+
+## Making it binding
+
+`leak-check --gate REPO` also exits 1 when a class of pattern did not run (a missing pattern file or plans directory), which
+otherwise reads as PASS. `leak-check --install-hook pre-push REPO` (or `pre-commit`) writes a git hook that runs the gate and
+blocks the push or commit on a failure; `git push --no-verify` or `AGENTS_LEAK_CHECK_GATE=off` skips it, and the hook logs the
+second. A hook it did not write is never replaced.
