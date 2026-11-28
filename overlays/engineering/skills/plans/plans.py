@@ -327,17 +327,32 @@ class Plans(LoggingArgs, Cli):
         "Only the current phase's `### Phase` block."
         ("--block",)
 
+        @staticmethod
+        def _nothing_open(plan, blocked) -> str:
+            if not blocked:
+                return "%s: every phase is checked" % plan.name
+            return ("%s: no phase is open and the plan is not finished; blocked: %s. "
+                    "Unblock it and `plans start %s <phase>`, or park the plan with "
+                    "`plans status %s on-hold -m \"<reason>\"`."
+                    % (plan.name,
+                       "; ".join("Phase %s: %s%s" % (b.id, b.name, " -- " + b.note if b.note else "")
+                                 for b in blocked),
+                       plan.name, plan.name))
+
         def __call__(self) -> int:
             plan = self.store().require(self.name)
             current = plan.current()
+            blocked = [it for it in plan.items() if it.box == "!"]
             if self.block_only:
                 if current is None:
-                    raise _fail("%s: every phase is checked" % plan.name)
+                    raise _fail(self._nothing_open(plan, blocked))
                 _out(plan.phase_text(current.id))
                 return 0
             _out(plan.head_text() + "\n")
             _out(plan.section_text(SECTIONS["progress"]) + "\n")
-            if current is None:
+            if current is None and blocked:
+                _out(self._nothing_open(plan, blocked) + "\n")
+            elif current is None:
                 _out("Every phase is checked. Close the plan: "
                      "plans status %s done -m \"<evidence>\"\n" % plan.name)
             else:

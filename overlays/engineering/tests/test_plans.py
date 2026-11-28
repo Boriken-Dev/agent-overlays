@@ -515,3 +515,22 @@ def test_the_command_line_reads_and_edits_parts(tmp_path):
     assert "- Note: port is 4433" in run("show", "relay_support", "-p", "2").stdout
     assert run("note", "relay_support", "-m", "a general fact").returncode == 0
     assert "- a general fact" in run("show", "relay_support", "-s", "facts").stdout
+
+
+def test_next_does_not_call_a_blocked_plan_finished(tmp_path):
+    d = str(tmp_path / "plans")
+    run_cli(tmp_path, "add", "relay_support", "--dir", d, "-t", "Relay", "-p", "parse", "-p", "verify")
+    run_cli(tmp_path, "status", "relay_support", "ready", "--dir", d)
+    run_cli(tmp_path, "start", "relay_support", "1", "--dir", d)
+    run_cli(tmp_path, "check", "relay_support", "1", "--dir", d, "-m", "ok")
+    blocked = run_cli(tmp_path, "block", "relay_support", "2", "--dir", d, "-m", "needs the VM")
+    assert blocked.returncode == 0, blocked.stderr
+
+    nxt = run_cli(tmp_path, "next", "relay_support", "--dir", d)
+    assert nxt.returncode == 0, nxt.stderr
+    assert "Every phase is checked" not in nxt.stdout
+    assert "blocked" in nxt.stdout and "Phase 2: verify" in nxt.stdout and "needs the VM" in nxt.stdout
+
+    only = run_cli(tmp_path, "next", "relay_support", "--dir", d, "--block")
+    assert only.returncode != 0
+    assert "every phase is checked" not in only.stderr and "blocked" in only.stderr
