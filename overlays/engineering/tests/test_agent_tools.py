@@ -128,3 +128,17 @@ def test_the_environment_names_the_machine_file(tmp_path, monkeypatch):
     target.write_text('[identity]\nname = "Z"\nemail = "z@example.test"\n', encoding="utf-8")
     monkeypatch.setenv("AGENT_TOOLS_LOCAL", str(target))
     assert at.load(None).identity() == ("Z", "z@example.test")
+
+
+def test_a_linked_worktree_reads_the_main_checkouts_project_file(tmp_path):
+    import subprocess
+
+    main = tmp_path / "main"
+    (main / ".agents").mkdir(parents=True)
+    (main / ".agents" / "agent-tools.toml").write_text('[gate]\nsteps = [{ name = "t", run = "true" }]\n')
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.test", "-C", str(main)]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+    tree = tmp_path / "wt"
+    subprocess.run([*git, "worktree", "add", "-q", str(tree)], check=True)
+    assert at.load(tree).get("gate", "steps")

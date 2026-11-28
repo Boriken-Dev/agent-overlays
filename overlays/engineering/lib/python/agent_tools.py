@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -177,10 +178,25 @@ class Config:
         return check_message(text, self.forbidden_trailers())
 
 
+def project_root(worktree: Path | str) -> Path:
+    """The directory whose `.agents/agent-tools.toml` governs `worktree`: itself when it has one, else the
+    main checkout of a linked worktree (`.agents` is private, so a worktree never carries it)."""
+    path = Path(worktree)
+    if (path / PROJECT_FILE).is_file():
+        return path
+    try:
+        common = subprocess.run(["git", "-C", str(path), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                                capture_output=True, text=True, timeout=30).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return path
+    main = Path(common).parent if common else path
+    return main if (main / PROJECT_FILE).is_file() else path
+
+
 def load(project: Path | str | None = None, local: Path | str | None = None) -> Config:
     """Both files, merged. A missing file is an empty one; a table in a file that is not that file's
     to hold is an unknown table."""
-    project_file = Path(project) / PROJECT_FILE if project is not None else None
+    project_file = project_root(project) / PROJECT_FILE if project is not None else None
     local_file = Path(local) if local is not None else local_path()
     config = Config(project_path=project_file, local_path=local_file)
     sources = [(local_file, LOCAL_SCHEMA)]
