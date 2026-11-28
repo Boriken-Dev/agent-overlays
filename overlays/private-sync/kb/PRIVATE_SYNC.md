@@ -85,8 +85,15 @@ touch a project directory.
   can run it in a project that already has `.agents/`. Re-running is idempotent.
   - `--copy` mirrors the store as a real directory instead of symlinking (Windows or
     any no-symlink environment; a symlink failure auto-falls back to this).
+  - An adopt copies into a sibling directory and renames it into place, so a failure
+    leaves both sides as they were; a symlink that points nowhere is skipped with a
+    warning. When both project and store carry content the refusal says whether one is
+    a strict subset of the other.
+  - `--prefer-project` backs the project's `.agents/` up to `.agents.bak` and puts its
+    files into the store (the store's other files stay): the resolution when the store
+    is the partial side.
   - `--force` backs up a conflicting real `.agents/` (both project and store carry
-    content) or replaces a stale symlink. A `.agents` that is itself a git checkout is
+    content) and keeps the store, or replaces a stale symlink. A `.agents` that is itself a git checkout is
     backed up whole, `.git` included, to `.agents.bak`, and never adopted.
   - `--store-repo self|<path>|<url>` and `--store-branch <name>`: keep the store on a
     branch of another repository (see *Two store layouts*); recorded per project.
@@ -111,37 +118,44 @@ touch a project directory.
 
 A linked project's `.agents/scratch/` is `~/.agents/projects/<name>/scratch/`, inside
 the private repo, and the built-in git path commits everything it is not told to
-ignore. So the first `private-sync sync` on that path appends a block of default
-rules to `~/.agents/.gitignore` (creating the file if there is none):
+ignore. So the first `private-sync sync` on that path writes a block of default
+rules to `~/.agents/.gitignore` (creating the file if there is none), and a new
+project branch starts with the same rules in its own `.gitignore`. The default
+policy is **deny-all**: everything is ignored except the file types the block names.
 
 ```
 # dotagents private-sync: defaults for a store kept in git
-scratch/
-tmp/
-__pycache__/
-.*
-!.gitignore
-!.gitattributes
-!.gitkeep
-!.ignore
-!.dotagents-install.json
-*.local.*
-local.env
+# policy: deny-all
+*
+!*/
+!*.md   !*.toml   !*.json   !*.yaml   !*.yml   !*.txt   !*.cfg
+!*.py   !*.sh     !*.ps1    !*.png    !*.svg   !*.jpg
+!.gitignore  !.gitattributes  !.gitkeep  !.ignore  !.dotagents-install.json
+scratch/  tmp/  __pycache__/  .*/  *.local.*  local.env  **/logs/*.txt
 ```
 
-- `scratch/` and `tmp/` are throwaway directories, at the store's root and in every
-  project store.
-- `.*` leaves out hidden files and directories (tool caches, the overlay source
-  cache). The `!` lines keep the dot-files a store and its installed overlays need.
+(each name is its own line in the file). A file of any other type (a database, a
+`.docx`, a binary) is not synced: add a `!pattern` line to keep one.
+
+- `scratch/`, `tmp/` and `__pycache__/` are throwaway directories, and `.*/` leaves out
+  hidden directories (tool caches, the overlay source cache, venvs).
 - `*.local.*` and `local.env` are the machine-local overrides (`AGENTS.local.md`, a
   project's `local.env`), which are never shared.
+- On a store that already has a `.gitignore`, the deny-all block goes **above** its
+  rules, so a rule the store already has wins over the block.
+
+**Weakening it**: `AGENTS_STORE_IGNORE=allow-all` writes the earlier block instead, which
+keeps every file it does not list (hidden files and directories, the throwaway
+directories and the local overrides are still left out), and each sync that writes it
+logs that. An unknown value is an error.
 
 The block is written **once**: a `.gitignore` that already has its first line is left
-alone. Delete a rule from it, or add a `!` exception below it, to opt out of one;
-keep the first line so the block is not written again. Rules you already had are
-kept, above the block. A rule only affects files git does not track yet: `git rm
---cached` one that was committed before. A `hooks/sync` script owns transport and
-gets no block.
+alone, whichever policy wrote it. A store written before policies existed has the
+allow-all block and keeps it; each sync prints one line saying so. Delete the block
+(from its first line) to be given the current one. Delete a rule from it, or add a `!`
+exception below it, to opt out of one; keep the first line so the block is not written
+again. A rule only affects files git does not track yet: `git rm --cached` one that was
+committed before. A `hooks/sync` script owns transport and gets no block.
 
 ## First-time setup
 

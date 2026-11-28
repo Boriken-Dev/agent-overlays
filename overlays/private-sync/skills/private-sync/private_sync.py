@@ -92,6 +92,12 @@ class PrivateSync(LoggingArgs, Cli):
         "Replace an existing .agents symlink, or back up a conflicting real .agents dir."
         ("--force",)
 
+        prefer_project: bool = False
+        ("When the project's .agents and the store both hold files, back the project copy up and "
+         "put its files into the store (keeping the ones only the store has), instead of "
+         "keeping the store as it is.")
+        ("--prefer-project",)
+
         store_repo: Optional[str] = None
         ("Keep the store on another repository: 'self' (a branch of the project's own "
          "repo), a local git repo, or a git URL (default: a branch of the agents repo). "
@@ -108,6 +114,7 @@ class PrivateSync(LoggingArgs, Cli):
             link.link_project(
                 self.path, self.agents_dir or link.default_agents_dir(), name=self.name,
                 store_dir=self.store_dir, copy=self.copy, force=self.force,
+                prefer_project=self.prefer_project,
                 dry_run=self.dry_run, logger=_LOG, store_repo=self.store_repo,
                 store_branch=self.store_branch,
             )

@@ -73,21 +73,93 @@ def resolve_name(project_dir: Path, name: Optional[str]) -> str:
     return name or Path(project_dir).resolve().name
 
 
-def _copy_tree(src: Path, dst: Path, *, overwrite: bool) -> int:
+def _copy_tree(src: Path, dst: Path, *, overwrite: bool, log=None) -> int:
     """Recursively copy files from ``src`` into ``dst``. Returns the file count.
-    With ``overwrite=False`` an existing destination file is left untouched."""
+    With ``overwrite=False`` an existing destination file is left untouched.
+    A symlink that points nowhere, or at a directory, is skipped with a warning
+    through ``log``."""
     count = 0
-    for root, _dirs, files in os.walk(src):
+    for root, dirs, files in os.walk(src):
         rel = Path(root).relative_to(src)
         target_root = dst / rel
         target_root.mkdir(parents=True, exist_ok=True)
+        for dname in dirs:
+            if os.path.islink(str(Path(root) / dname)) and log:
+                log("WARN: skipped the symlinked directory %s", Path(root, dname))
         for fname in files:
+            source = Path(root) / fname
+            if os.path.islink(str(source)) and not os.path.exists(str(source)):
+                if log:
+                    log("WARN: skipped the dangling symlink %s", source)
+                continue
             target = target_root / fname
             if target.exists() and not overwrite:
                 continue
-            shutil.copy2(str(Path(root) / fname), str(target))
+            shutil.copy2(str(source), str(target))
             count += 1
     return count
+
+
+def _adopt_tree(src: Path, store: Path, log) -> None:
+    """Put ``src``'s files into ``store`` (``src`` wins a file both have), all or nothing.
+
+    The store's new content is built in ``.incoming-<pid>`` beside it and swapped in with renames, so a
+    failure while copying leaves the store, and ``src``, as they were."""
+    incoming = store.parent / (".incoming-%d" % os.getpid())
+    old = store.parent / (".replaced-%d" % os.getpid())
+    for leftover in (incoming, old):
+        shutil.rmtree(str(leftover), ignore_errors=True)
+    try:
+        incoming.mkdir(parents=True)
+        if store.is_dir():
+            _copy_tree(store, incoming, overwrite=True)
+        _copy_tree(src, incoming, overwrite=True, log=log)
+    except (OSError, shutil.Error) as exc:
+        shutil.rmtree(str(incoming), ignore_errors=True)
+        raise SystemExit("error: copying %s failed (%s); the project's .agents and the "
+                         "store are unchanged" % (src, exc))
+    if store.exists():
+        os.replace(str(store), str(old))
+    try:
+        os.replace(str(incoming), str(store))
+    except OSError:
+        if old.exists():
+            os.replace(str(old), str(store))
+        raise
+    shutil.rmtree(str(old), ignore_errors=True)
+
+
+def _real_files(root: Path) -> "dict[str, Path]":
+    found = {}
+    for path in root.rglob("*"):
+        if path.is_file() and path.name != ".gitkeep" and not (
+                os.path.islink(str(path)) and not os.path.exists(str(path))):
+            found[path.relative_to(root).as_posix()] = path
+    return found
+
+
+def _compare_copies(project_agents: Path, store: Path) -> str:
+    """One sentence on how the project's ``.agents`` relates to the store, for a refusal."""
+    import filecmp
+
+    mine, theirs = _real_files(project_agents), _real_files(store)
+    only_project = sorted(set(mine) - set(theirs))
+    only_store = sorted(set(theirs) - set(mine))
+    differ = sorted(r for r in set(mine) & set(theirs)
+                    if not filecmp.cmp(str(mine[r]), str(theirs[r]), shallow=False))
+    if not differ and not only_project and only_store:
+        return ("the project copy is a strict subset of the store (%d file(s), every one in "
+                "the store unchanged): --force backs it up and keeps the store, losing nothing"
+                % len(mine))
+    if not differ and only_project and not only_store:
+        return ("the store is a strict subset of the project copy (%d file(s) are only in the "
+                "project: an earlier adopt may have stopped part way): --force would back up "
+                "the project copy and keep the incomplete store; --prefer-project adopts the "
+                "project copy into the store instead" % len(only_project))
+    if not differ and not only_project and not only_store:
+        return "the two hold the same files: --force is safe"
+    return ("they diverge: %d only in the project, %d only in the store, %d differ"
+            % (len(only_project), len(only_store), len(differ)))
 
 
 def _store_has_real_content(store: Path) -> bool:
@@ -193,6 +265,7 @@ def link_project(
     logger=None,
     store_repo: Optional[str] = None,
     store_branch: Optional[str] = None,
+    prefer_project: bool = False,
 ) -> str:
     """Link ``<project>/.agents`` to its store (default ``<agents_dir>/projects/<name>``;
     see ``store_root`` -- the layout is a convention, overridable with ``store_dir``).
@@ -207,7 +280,12 @@ def link_project(
     An existing real ``.agents/`` is *adopted* into an empty store on first link
     (its content moves into the private repo, then the link replaces it). A
     conflict (both the project's ``.agents`` and the store carry real content)
-    needs ``--force`` (which backs the project copy up and keeps the store).
+    needs ``--force`` (which backs the project copy up and keeps the store), or
+    ``prefer_project`` (which backs the project copy up and puts its files into the
+    store, which keeps the files only it has); the refusal says whether one side
+    is a strict subset of the other. An adopt copies into a sibling directory and
+    renames it into place, so a failure leaves both sides as they were, and a
+    symlink that points nowhere is skipped with a warning.
     A ``.agents`` that is itself a git checkout is never adopted -- it is left
     in place untouched (``--force`` backs it up and links the store instead)."""
     log = _Log(logger)
@@ -287,20 +365,26 @@ def link_project(
                 log("adopt: %s/.agents -> store %s", project_dir.name, store)
                 if not dry_run:
                     _seed_store(store, False)
-                    _copy_tree(target, store, overwrite=False)
+                    _adopt_tree(target, store, log)
                     shutil.rmtree(str(target))
             else:
                 if not dry_run:
                     shutil.rmtree(str(target))
         elif target_has:
-            if not force:
+            if not force and not prefer_project:
                 raise SystemExit(
-                    "error: both %s/.agents and the store %s carry content; re-run "
+                    "error: both %s/.agents and the store %s carry content (%s); re-run "
                     "with --force to back up the project copy and use the store"
-                    % (project_dir.name, store)
+                    % (project_dir.name, store, _compare_copies(target, store))
                 )
             backup = _next_backup(project_dir)
-            log("force: backing up %s/.agents -> %s", project_dir.name, backup.name)
+            if prefer_project:
+                log("prefer-project: adopting %s/.agents into %s, backed up at %s",
+                    project_dir.name, store, backup.name)
+                if not dry_run:
+                    _adopt_tree(target, store, log)
+            else:
+                log("force: backing up %s/.agents -> %s", project_dir.name, backup.name)
             if not dry_run:
                 shutil.move(str(target), str(backup))
         else:  # store has content, target is an empty dir
@@ -325,7 +409,7 @@ def link_project(
         log("store: %s", store)
 
     if copy:
-        n = 0 if dry_run else _copy_tree(store, target, overwrite=True)
+        n = 0 if dry_run else _copy_tree(store, target, overwrite=True, log=log)
         log("copied store -> %s/.agents (%s file(s)) [copy mode]", project_dir.name,
             "?" if dry_run else n)
     else:
@@ -377,6 +461,50 @@ BRANCH_IGNORE = (
     "!.gitkeep",
     "!.ignore",
 )
+
+
+#: ``AGENTS_STORE_IGNORE``: ``deny-all`` (the default) writes ignore rules that keep only the
+#: file types they name; ``allow-all`` writes the earlier rules, which keep everything not listed.
+IGNORE_POLICY_ENV = "AGENTS_STORE_IGNORE"
+IGNORE_POLICIES = ("deny-all", "allow-all")
+
+#: The file types a store or a project's store keeps under ``deny-all``.
+KEPT_NAMES = (
+    "*.md", "*.toml", "*.json", "*.yaml", "*.yml", "*.txt", "*.cfg", "*.py", "*.sh", "*.ps1",
+    "*.png", "*.svg", "*.jpg",
+    ".gitignore", ".gitattributes", ".gitkeep", ".ignore", ".dotagents-install.json",
+)
+
+#: Always left out, after the kept names so they win.
+DENIED_NAMES = (
+    "scratch/", "tmp/", "__pycache__/", ".*/", "*.local.*", "local.env", "**/logs/*.txt",
+)
+
+
+def _kept_rules() -> "tuple[str, ...]":
+    return ("*", "!*/") + tuple("!" + name for name in KEPT_NAMES) + DENIED_NAMES
+
+
+#: A new project branch's rules under ``deny-all``.
+BRANCH_IGNORE_DENY_ALL = _kept_rules()
+
+
+def ignore_policy(log=None) -> str:
+    """The ignore policy new rules are written under, from ``AGENTS_STORE_IGNORE``."""
+    value = os.environ.get(IGNORE_POLICY_ENV, "").strip().lower() or "deny-all"
+    if value not in IGNORE_POLICIES:
+        raise SystemExit("error: %s must be one of: %s" % (IGNORE_POLICY_ENV, ", ".join(IGNORE_POLICIES)))
+    if value == "allow-all" and log:
+        log("gitignore: %s=allow-all -- the new rules keep every file they do not list; the "
+            "default keeps only the file types it names", IGNORE_POLICY_ENV)
+    return value
+
+
+def branch_ignore_lines(log=None) -> "list[str]":
+    """The ``.gitignore`` lines a new project branch starts with, under the current policy."""
+    if ignore_policy(log) == "allow-all":
+        return list(BRANCH_IGNORE)
+    return list(BRANCH_IGNORE_DENY_ALL)
 
 
 def branch_layout(agents_dir: Path, name: str, store_dir=None) -> bool:
@@ -510,7 +638,7 @@ def _link_branch(project_dir: Path, agents_dir: Path, name: str, *, force: bool,
     gi = target / ".gitignore"
     if not gi.exists():
         with open(gi, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write("\n".join(BRANCH_IGNORE) + "\n")
+            handle.write("\n".join(branch_ignore_lines(log)) + "\n")
     if carried is not None and carried.exists():
         _move_into(carried, target)
         if carried.parent == project_dir:
@@ -680,7 +808,7 @@ def _link_clone(project_dir: Path, url: str, branch: str, *, force: bool,
     gi = target / ".gitignore"
     if not gi.exists():
         with open(gi, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write("\n".join(BRANCH_IGNORE) + "\n")
+            handle.write("\n".join(branch_ignore_lines(log)) + "\n")
     if carried is not None and carried.exists():
         _move_into(carried, target)
         if carried.parent == project_dir:
@@ -817,41 +945,63 @@ STORE_IGNORE_DEFAULTS = (
 )
 
 
+#: Second line of a block written under a policy; a block without it is an earlier one (``allow-all``).
+POLICY_LINE = "# policy: "
+
+
 def ensure_store_gitignore(agents_dir: Path, *, dry_run: bool = False, log=None) -> bool:
     """Give a git-kept store its default ignore rules, once. True when written.
 
-    The block is appended to ``<agents_dir>/.gitignore`` (created if absent)
-    under ``STORE_IGNORE_MARK``. A file that already carries that line is left
-    alone, whatever its other lines say: removing a rule from the block, or
-    adding a ``!`` exception after it, is how a store opts out of one. Rules
-    already in the file are kept, and the block follows them, so it wins where
-    the two disagree. The file keeps the line ending it has.
+    Under the default policy (``deny-all``, see ``IGNORE_POLICY_ENV``) the block ignores everything
+    except the file types it names, and is written *above* the file's own rules, so a rule the store
+    already has still wins. Under ``allow-all`` it is the earlier block: it keeps everything it does
+    not list, and follows the file's own rules.
+
+    A file that already carries ``STORE_IGNORE_MARK`` is left alone, whatever its other lines say:
+    removing a rule from the block, or adding a ``!`` exception after it, is how a store opts out of
+    one. One written before policies existed gets a one-line notice through ``log``. The file keeps
+    the line ending it has.
     """
     path = Path(agents_dir) / ".gitignore"
     try:
         existing = path.read_bytes().decode("utf-8")
     except FileNotFoundError:
         existing = ""
-    if any(line.strip() == STORE_IGNORE_MARK for line in existing.splitlines()):
+    lines = existing.splitlines()
+    if any(line.strip() == STORE_IGNORE_MARK for line in lines):
+        if log and not any(line.startswith(POLICY_LINE) for line in lines):
+            log("gitignore: %s has the allow-all block of earlier versions, which keeps every file "
+                "it does not list; delete it from the line '%s' on to be given the default, which "
+                "keeps only named file types", path, STORE_IGNORE_MARK)
         return False
+    policy = ignore_policy(log)
     if log:
-        log("gitignore: adding the store defaults to %s", path)
+        log("gitignore: adding the store defaults (%s) to %s", policy, path)
     if dry_run:
         return True
     newline = "\r\n" if "\r\n" in existing else "\n"
     block = [
         STORE_IGNORE_MARK,
-        "# Written once by `private-sync sync`. Edit it as you like; keep the",
-        "# line above so it is not written again.",
-        *STORE_IGNORE_DEFAULTS,
+        POLICY_LINE + policy,
+        "# Written once by `private-sync sync`. Edit it as you like; keep the first",
+        "# line so it is not written again.",
     ]
-    prefix = existing
-    if prefix and not prefix.endswith(("\n", "\r")):
-        prefix += newline
-    if prefix:
-        prefix += newline
+    if policy == "deny-all":
+        block += ["# Everything is ignored except the file types named below: add a `!pattern` "
+                  "line to keep another.", *_kept_rules()]
+        text = newline.join(block) + newline
+        if existing:
+            text += newline + existing
+    else:
+        block += list(STORE_IGNORE_DEFAULTS)
+        prefix = existing
+        if prefix and not prefix.endswith(("\n", "\r")):
+            prefix += newline
+        if prefix:
+            prefix += newline
+        text = prefix + newline.join(block) + newline
     with open(path, "w", encoding="utf-8", newline="") as handle:
-        handle.write(prefix + newline.join(block) + newline)
+        handle.write(text)
     return True
 
 

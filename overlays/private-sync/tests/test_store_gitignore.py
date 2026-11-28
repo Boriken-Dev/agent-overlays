@@ -22,7 +22,8 @@ def _lines(path):
     return path.read_bytes().decode("utf-8").splitlines()
 
 
-def test_a_store_without_a_gitignore_gets_the_defaults(tmp_path):
+def test_a_store_without_a_gitignore_gets_the_defaults(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTS_STORE_IGNORE", "allow-all")
     assert ensure_store_gitignore(tmp_path) is True
     lines = _lines(tmp_path / ".gitignore")
     assert lines[0] == STORE_IGNORE_MARK
@@ -43,7 +44,8 @@ def test_the_block_is_written_once_and_an_edited_one_is_left_alone(tmp_path):
     assert _lines(path) == edited
 
 
-def test_existing_rules_are_kept_and_the_block_follows_them(tmp_path):
+def test_existing_rules_are_kept_and_the_allow_all_block_follows_them(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENTS_STORE_IGNORE", "allow-all")
     path = tmp_path / ".gitignore"
     path.write_bytes(b"# mine\n!scratch/keep.md\n*.bak")  # no final newline
 
@@ -51,6 +53,15 @@ def test_existing_rules_are_kept_and_the_block_follows_them(tmp_path):
     lines = _lines(path)
     assert lines[:3] == ["# mine", "!scratch/keep.md", "*.bak"]
     assert lines[3] == "" and lines[4] == STORE_IGNORE_MARK
+
+
+def test_the_deny_all_block_goes_above_the_existing_rules(tmp_path, monkeypatch):
+    monkeypatch.delenv("AGENTS_STORE_IGNORE", raising=False)
+    path = tmp_path / ".gitignore"
+    path.write_bytes(b"# mine\n*.bak\n")
+    assert ensure_store_gitignore(tmp_path) is True
+    lines = _lines(path)
+    assert lines[0] == STORE_IGNORE_MARK and lines[-2:] == ["# mine", "*.bak"]
 
 
 def test_a_crlf_file_stays_crlf(tmp_path):
