@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -919,3 +920,21 @@ def test_the_offline_plan_takes_the_reduced_checkout_and_lists_only_the_lock_s_p
     seeded = Path(result["cache"]) / "git" / GIT_KEY
     assert (seeded / ".git" / "pub-packages").read_text() == "pkg/inner"
     assert tree_of(seeded) == {"pkg/inner/pubspec.yaml", ".git/pub-packages"}
+
+
+def test_check_finds_a_git_package_at_the_repository_root_and_one_in_a_subfolder(build, app, capsys):
+    root, cache, deps = app
+    checkout = cache / "git" / GIT_KEY
+    (checkout / "pubspec.yaml").write_text("name: gitpkg\n", encoding="utf-8")
+    for path in ('"."', '"./"', '"pkg/inner"', '"./pkg/inner/"'):
+        (root / "app" / "pubspec.lock").write_text(PUBSPEC.replace('"pkg/inner"', path), encoding="utf-8")
+        shutil.rmtree(deps, ignore_errors=True)
+        assert sync(build, root, cache, deps) == 0
+        capsys.readouterr()
+        assert build.main(["--root", str(root), "deps", "check", "--deps", str(deps)]) == 0, path
+    # Control: a root package that is not on the branch is still reported, with a path that has no `./`.
+    (root / "app" / "pubspec.lock").write_text(PUBSPEC.replace('"pkg/inner"', '"."'), encoding="utf-8")
+    assert sync(build, root, cache, deps) == 0
+    (deps / "pub" / "git" / GIT_KEY / "pubspec.yaml").unlink()
+    assert build.main(["--root", str(root), "deps", "check", "--deps", str(deps), "--quick"]) == 1
+    assert f"there is no pub/git/{GIT_KEY}/pubspec.yaml" in capsys.readouterr().err

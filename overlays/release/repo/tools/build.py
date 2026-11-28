@@ -2624,7 +2624,8 @@ def pub_check(ctx: Ctx, view: Any, lock: Lock) -> tuple[list[str], list[str]]:
             where = f"pub/hosted/{package.host}/{package.key}"
             have = view.exists(where)
         elif package.source == "git" and cfg.git == "checkout":
-            where = f"pub/git/{package.key}/{package.path}/pubspec.yaml".replace("//", "/")
+            folder = pub_folder(package.path)
+            where = f"pub/git/{package.key}/pubspec.yaml" if folder == "." else f"pub/git/{package.key}/{folder}/pubspec.yaml"
             have = view.exists(where)
         elif package.source == "git":
             where = f"{MANIFEST} gitDependencies"
