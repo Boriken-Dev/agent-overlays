@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- engineering: `leak-check --gate` fails a scan in which a class of pattern did not run (INCOMPLETE) instead of passing it, and
+  `--install-hook pre-push|pre-commit` writes a git hook that runs the gate (skipped by `--no-verify` or
+  `AGENTS_LEAK_CHECK_GATE=off`, which it logs; a hook it did not write is never replaced).
+- private-sync: `link --prefer-project` backs the project's `.agents` up and puts its files into a store that is the
+  partial side; a refusal says whether one side is a strict subset of the other.
+- engineering: `AGENTS_SCOPE_PIN=1` keeps `AGENTS_PROJECT_ROOT` when a command runs from another project's directory.
+
 - private-sync: the turn-end hook returns at once. It records the request and starts the sync as a detached runner with a
   single-flight lock, so turns that end during a sync join its next pass instead of racing it and the hook no longer
   reports `hook-failed private-sync turn-end timeout`. The runner syncs every linked store with uncommitted or unpushed work,
@@ -80,11 +87,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- private-sync: a store's default ignore rules, and a new project branch's, deny everything except the file types they name
+  (`AGENTS_STORE_IGNORE=allow-all` writes the earlier rules and is logged). A store that already has the earlier block keeps
+  it and each sync prints one line saying so.
+- engineering: a command run from inside another project's directory uses that project, not `AGENTS_PROJECT_ROOT`.
+
 - rust: `unsafe` is allowed when proved necessary (no safe API does it, or a measured performance need), with the reason kept in
   the list of allowed files; a limitation kept only to avoid `unsafe` is a defect.
 
 ### Fixed
 
+- engineering: `plans next` on a plan whose only open phase is blocked says so, instead of calling every phase checked.
+- private-sync: adopting a `.agents` into a store copies into a sibling directory and renames it into place, and skips a
+  symlink that points nowhere with a warning, so a failure no longer leaves a partial store.
 - release: `build.py scan` no longer flags text in a single-byte encoding (ISO-8859-1, Windows-1252, or UTF-8 holding a stray
   such byte) as an unrecognised binary. Text with no NUL, no control character but tab, LF, FF and CR, and at most 10% of its
   bytes from 0x80 up passes and is reported as `NOTE text, not UTF-8`; a private key in it is still refused, and binaries,
